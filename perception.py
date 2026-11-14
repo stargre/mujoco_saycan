@@ -8,6 +8,9 @@ class Vision:
   for name,gid in self.ids.items():
    mask=(seg[:,:,0]==gid)&(seg[:,:,1]==int(mujoco.mjtObj.mjOBJ_GEOM));ys,xs=np.where(mask)
    if len(xs)<5:continue
-   z=float(np.median(dep[ys,xs]));u=float(np.median(xs));v=float(np.median(ys));p=cp+R@np.array([(u-rgb.shape[1]/2)*z/fx,-(v-rgb.shape[0]/2)*z/fy,z])
+   z=float(np.median(dep[ys,xs]));u=float(np.median(xs));v=float(np.median(ys))
+   # MuJoCo camera looks along local -Z; local +Y points upward.
+   pc=np.array([(u-rgb.shape[1]/2)*z/fx,-(v-rgb.shape[0]/2)*z/fy,-z])
+   p=cp+R@pc
    out[name]={"position":p.tolist(),"confidence":min(1,len(xs)/100)}
   return out

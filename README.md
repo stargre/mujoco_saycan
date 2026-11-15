@@ -1,10 +1,10 @@
 # MuJoCo SayCan — Franka Panda
 
-A first integration baseline porting the MiniGrid SayCan architecture to a continuous-space Franka Panda tabletop manipulation scene in MuJoCo. It combines semantic skill selection, Say × Can scoring, camera segmentation/depth localization, Jacobian IK, joint trajectory control, gripper control and closed-loop replanning.
+An evolving integration of the MiniGrid SayCan architecture in a continuous-space Franka Panda tabletop manipulation scene.
 
-## 1. Dependencies
+## Setup
 
-Use the MuJoCo Menagerie Franka Emika Panda directory containing `scene.xml`, `panda.xml` and `assets/`. The robot model is not vendored in this repository.
+Use the MuJoCo Menagerie Franka Emika Panda directory containing `scene.xml`, `panda.xml` and `assets/`.
 
 ~~~bash
 conda activate mojoco
@@ -14,23 +14,29 @@ export PANDA_MODEL_DIR=/mnt/data2/zhiyu/embodied-lab/mujoco/05_franka_panda/mujo
 export MUJOCO_GL=egl
 ~~~
 
-## 2. Smoke test
+## Stage 1: model and camera smoke test
 
 ~~~bash
 python scripts/smoke_test.py
 ~~~
 
-The test loads the Menagerie Panda model, creates a tabletop scene, moves the arm to its home configuration, renders the overhead RGB-D camera, and checks that both cubes are visible.
+## Stage 2: camera localization and physical IK test
 
-## 3. Run SayCan
+~~~bash
+python scripts/test_ik_reach.py
+~~~
 
-Offline keyword baseline (for debugging only; not an LLM experiment):
+This compares camera estimates with simulator ground truth for evaluation only, verifies that IK does not teleport the robot, and executes a real joint trajectory to a pre-grasp waypoint. Ground truth is not provided to the planner.
+
+## Stage 3: SayCan task
+
+First use the keyword baseline to debug the skill pipeline:
 
 ~~~bash
 python scripts/run_saycan.py --scorer keyword --task "Pick up the red cube and place it near the blue cube"
 ~~~
 
-Qwen relevance scorer:
+Then test Qwen semantic relevance:
 
 ~~~bash
 export DASHSCOPE_API_KEY=YOUR_KEY
@@ -38,17 +44,13 @@ export QWEN_MODEL=qwen-plus
 python scripts/run_saycan.py --scorer qwen --task "Pick up the red cube and place it near the blue cube"
 ~~~
 
-## 4. Code layout
+## Important implementation notes
 
-- `mujoco_env.py`: scene composition and simulation/rendering gateway.
-- `perception.py`: segmentation and depth back-projection.
-- `robot.py`: Panda joint control, damped-least-squares IK and gripper.
-- `context.py`: robot context and observation-derived belief.
-- `skills.py`: Explore, Find, NavigateTo, Reach, PickUp, PlaceNear and Done.
-- `saycan.py`: semantic relevance and SayCan selection loop.
+- SayCan now transitions to `Done` after a verified placement, instead of repeating `PickUp` and `PlaceNear`.
+- IK is a pure computation: it restores the live qpos before the joint trajectory is executed.
+- A grasp is accepted only when the target cube contacts a finger geom after lifting; cube-table contact is not accepted.
+- Placement is accepted only after the released cube is observed near the reference cube and is no longer in finger contact.
 
-The planner uses camera-derived object estimates and robot proprioception. Object ground-truth poses are not intentionally supplied to semantic planning.
+## Current limitations
 
-## 5. Current limitations
-
-This is an initial integration baseline, not a verified full reproduction of Google's real-robot system. It currently targets the included red/blue cube scene and a fixed overhead camera. IK is position-only damped least squares; there is no global collision-aware motion planner, robust grasp controller, learned affordance model, or broad task benchmark yet. The placement routine still needs an independent post-release object-pose check. Validate the smoke test and inspect trajectories on the target host before treating a run as successful experimental evidence.
+This remains a limited two-cube tabletop prototype, not a verified full reproduction of Google's real-robot system. IK is position-only and does not perform global collision-aware planning. The fixed camera and hand-frame waypoint offsets need calibration on the target model. Grasp friction, contact stability, and placement tolerance must be validated through the physical trajectory tests before using success rates as research evidence.

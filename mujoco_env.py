@@ -15,10 +15,10 @@ def build_model(folder):
     if world is None:
         raise RuntimeError(f"No <worldbody> found in {source}")
 
-    # Table top is z=0.36 m; cubes are placed directly on it (0.385 m center).
     additions = [
         '<geom name="table" type="box" pos="0.48 0 0.32" size="0.42 0.48 0.04" rgba="0.55 0.48 0.38 1" friction="1.2 0.02 0.002"/>',
         '<camera name="overhead" pos="0.48 -0.72 1.05" xyaxes="1 0 0 0 0.82 0.57" fovy="55"/>',
+        '<camera name="side_view" pos="1.2 -1.2 1.0" xyaxes="0.848 0.530 0 -0.222 0.355 0.914" fovy="50"/>',
         '<body name="red_cube" pos="0.43 -0.16 0.385"><freejoint/><geom name="red_cube_geom" type="box" size="0.025 0.025 0.025" mass="0.08" rgba="0.9 0.08 0.06 1" friction="1.5 0.02 0.002"/></body>',
         '<body name="blue_cube" pos="0.55 0.16 0.385"><freejoint/><geom name="blue_cube_geom" type="box" size="0.025 0.025 0.025" mass="0.08" rgba="0.05 0.2 0.95 1" friction="1.5 0.02 0.002"/></body>',
         '<geom name="target_marker" type="cylinder" pos="0.55 0.16 0.362" size="0.065 0.002" rgba="0.1 0.85 0.2 0.45" contype="0" conaffinity="0"/>',
@@ -53,8 +53,8 @@ class Runtime:
     def step(self):
         mujoco.mj_step(self.m, self.d)
 
-    def render(self, mode="rgb"):
-        self.r.update_scene(self.d, camera="overhead")
+    def render(self, mode="rgb", camera="overhead"):
+        self.r.update_scene(self.d, camera=camera)
         if mode == "depth":
             self.r.enable_depth_rendering()
         elif mode == "seg":

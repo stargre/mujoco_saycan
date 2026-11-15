@@ -12,6 +12,28 @@ export PANDA_MODEL_DIR=/mnt/data2/zhiyu/embodied-lab/mujoco/05_franka_panda/mujo
 export MUJOCO_GL=egl
 ~~~
 
+## Visualization
+
+Headless server: export PNG snapshots and two camera-view GIFs of the actual simulated home-to-pregrasp joint trajectory:
+
+~~~bash
+python scripts/visualize_scene.py
+~~~
+
+Files are saved under `outputs/visualization/`:
+- `home_overhead.png`, `home_side_view.png`
+- `reach_overhead.gif`, `reach_side_view.gif`
+- `final_overhead.png`, `final_side_view.png`
+- `visualization_report.json`
+
+You can open the PNG/GIF files directly on the server or copy the directory to your workstation.
+
+Interactive GUI (requires a desktop display or X11 forwarding; not suitable for a headless SSH session without display forwarding):
+
+~~~bash
+python scripts/viewer_gui.py
+~~~
+
 ## Tests
 
 Model and RGB-D smoke test:
@@ -37,8 +59,6 @@ Detailed diagnosis of IK joint tracking, robot/table collision contacts, finger 
 ~~~bash
 python scripts/diagnose_manipulation.py
 ~~~
-
-Run this diagnostic before trying another full Pick-and-Place episode if the IK reach test fails.
 
 ## SayCan task
 

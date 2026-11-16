@@ -32,26 +32,16 @@ A grasp is accepted only when both fingers contact the target, the cube rises at
 
 ## Stage 3: PickUp -> PlaceNear -> Done
 
-Run the isolated placement integration test. It performs a fresh grasp, transports the cube while maintaining the validated top-down grasp orientation, releases it beside the blue cube, retreats, and checks the physical/perceptual postconditions.
-
 ~~~bash
 python scripts/test_place.py
 ~~~
 
-Outputs are saved to `outputs/place_test/`:
-- `place_overhead.gif` and `place_side_view.gif`
+Outputs are saved to \`outputs/place_test/\`:
+- \`place_overhead.gif\` and \`place_side_view.gif\`
 - Stage-by-stage PNG images
-- `place_report.json`
+- \`place_report.json\`
 
-The placement target is derived from the RGB-D belief for the blue cube. The release height uses the known table and cube geometry. The current TCP-to-object offset is an empirical calibration for this fixed scene and grasp orientation; recalibrate it if the cube dimensions, gripper orientation, or grasp strategy changes. MuJoCo ground-truth object poses are used only by the test script for final evaluation, not by SayCan planning or the PlaceNear target calculation.
-
-Acceptance requires:
-- PickUp, PlaceNear and Done all succeed
-- Red cube is in contact with the table and no longer in contact with either finger
-- No robot-table collision
-- Final red/blue center distance is between 5 cm and 13 cm
-- Placement target XY error is at most 4 cm
-- Cube height error and post-release settling displacement are each at most 1 cm
+The placement target is derived from the RGB-D belief for the blue cube. The release height uses the known table and cube geometry. The TCP-to-object offset is an empirical calibration for this fixed scene and grasp orientation; recalibrate it if the cube dimensions, gripper orientation, or grasp strategy changes.
 
 ## Stage 4: Planner state tests
 
@@ -59,13 +49,15 @@ Acceptance requires:
 python -m unittest tests/test_planner_state.py -v
 ~~~
 
-## Stage 5: Full SayCan task (after Stage 3 passes)
+## Stage 5: End-to-end SayCan task
+
+Keyword baseline:
 
 ~~~bash
 python scripts/run_saycan.py --scorer keyword --task "Pick up the red cube and place it near the blue cube"
 ~~~
 
-For Qwen:
+Qwen:
 
 ~~~bash
 export DASHSCOPE_API_KEY=YOUR_KEY
@@ -73,6 +65,31 @@ export QWEN_MODEL=qwen-plus
 python scripts/run_saycan.py --scorer qwen --task "Pick up the red cube and place it near the blue cube"
 ~~~
 
+The output is saved to \`outputs/last_run.json\`.
+
+## Stage 6: Multi-candidate SayCan planning
+
+The planner now exposes multiple candidates at each relevant state. For the initial two-cube scene, candidates include \`PickUp(red_cube)\`, \`PickUp(blue_cube)\`, and \`Done()\`. Qwen scores semantic relevance (Say), while Can independently evaluates gripper/object state and IK reachability for the candidate approach and manipulation poses. The selected action maximizes \`Say × Can\`.
+
+~~~bash
+python -m unittest tests/test_planner_state.py -v
+
+python scripts/run_saycan.py \
+  --scorer keyword \
+  --task "Pick up the red cube and place it near the blue cube"
+
+python scripts/run_saycan.py \
+  --scorer qwen \
+  --task "Pick up the red cube and place it near the blue cube"
+~~~
+
+Every round in \`outputs/last_run.json\` includes:
+- \`belief_before\` and \`belief_after\` immutable snapshots
+- \`candidate_scores\`: candidate ID, arguments, Say, Can, combined score and rationale
+- \`selected_candidate_id\` and selected action
+
+Can's current motion feasibility check is IK reachability for pre-grasp/grasp or pre-place/place poses. It is not a collision-aware path planner; that remains a limitation. The current \`Find\` primitive only refreshes the camera and does not yet perform active viewpoint search, so it is not marked feasible by Can.
+
 ## Current limitations
 
-This is a two-cube tabletop prototype, not a verified full reproduction of Google's real-robot system. IK supports a local 6D pose target but there is not yet a global collision-aware motion planner. Camera localization remains centimetre-scale, and the fixed grasp transform is specific to the current cube and orientation. These limitations must be addressed before transferring the controller to hardware or claiming general manipulation robustness.
+This is a two-cube tabletop prototype, not a verified full reproduction of Google's real-robot system. The scene-specific grasp transform and fixed top-down orientation require recalibration if object geometry or grasp strategy changes. Camera localization is centimetre-scale. There is no global collision-aware motion planner or general active-search policy yet. Dynamic recovery after a physically failed skill is the next development stage.

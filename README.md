@@ -12,36 +12,32 @@ export PANDA_MODEL_DIR=/mnt/data2/zhiyu/embodied-lab/mujoco/05_franka_panda/mujo
 export MUJOCO_GL=egl
 ~~~
 
-## Visualization and collision audit
+## Stage 1: TCP reach test
+
+The controlled end-effector point is the midpoint of the two main fingertip pads, not the wrist/hand body origin. For the Menagerie Panda model this is 0.1029 m along the hand-local +Z axis: 0.0584 m from the hand to each finger body plus 0.0445 m to the main fingertip pad center.
 
 ~~~bash
-python scripts/visualize_scene.py
+python scripts/test_ik_reach.py
 python scripts/diagnose_manipulation.py
 ~~~
 
-The tabletop now defaults to x=[0.34, 0.90] m, retaining both cubes while moving its front edge away from the Panda shoulder region. This is a candidate scene-clearance correction; verify the contact report on the target machine. The table can be tuned without editing code:
+The test checks IK state preservation, TCP forward kinematics, actual trajectory tracking, and robot-table contacts. It does not yet attempt to grasp an object.
+
+## Visualization
 
 ~~~bash
-export SAYCAN_TABLE_X_MIN=0.34
-export SAYCAN_TABLE_X_MAX=0.90
-export SAYCAN_TABLE_Y_HALF=0.48
-export SAYCAN_TABLE_TOP=0.36
-export SAYCAN_TABLE_THICKNESS=0.08
+python scripts/visualize_scene.py
 ~~~
 
-The visualizer marks robot-table contacts in PNG/GIF frames and reports contact locations in `visualization_report.json`. Cube-table support contacts are excluded from this collision warning.
+Outputs go to `outputs/visualization/`: overhead/side PNGs, reach GIFs and a JSON report with TCP and collision measurements.
 
-## Other tests
+## Stage 2: planner state tests
 
 ~~~bash
-python scripts/smoke_test.py
 python -m unittest tests/test_planner_state.py -v
-python scripts/test_ik_reach.py
 ~~~
 
-## SayCan task
-
-Only run the full task after the arm reaches the pre-grasp target without robot-table contacts and the grasp test is validated.
+## Stage 3: SayCan task (do not run until TCP grasp calibration passes)
 
 ~~~bash
 python scripts/run_saycan.py --scorer keyword --task "Pick up the red cube and place it near the blue cube"
@@ -57,4 +53,4 @@ python scripts/run_saycan.py --scorer qwen --task "Pick up the red cube and plac
 
 ## Current limitations
 
-This is a limited two-cube tabletop prototype, not a verified full reproduction of Google's real-robot system. IK is position-only and not collision-aware. The hand body origin is not the gripper TCP. The table clearance change must be validated on the target model; grasp and placement still require physical contact and postcondition verification.
+This is a limited two-cube tabletop prototype, not a verified full reproduction of Google's real-robot system. TCP IK is position-only; there is no global collision-aware planner or controlled orientation target yet. Perception calibration, robust grasp stability and placement postcondition checks still need validation before claiming end-to-end task success.

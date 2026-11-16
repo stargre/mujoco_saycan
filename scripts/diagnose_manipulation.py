@@ -1,10 +1,4 @@
-"""Diagnose Panda joint tracking, table contacts, finger geometry and gripper.
-
-Run:
-  python scripts/diagnose_manipulation.py
-
-Simulator ground truth is used only for debugging, not planner inputs.
-"""
+"""Diagnose Panda TCP tracking, table contacts, finger geometry and gripper."""
 from pathlib import Path
 import sys
 import numpy as np
@@ -26,9 +20,7 @@ def object_name(model, obj_type, idx):
 
 def table_contacts(model, data):
     rows = []
-    table_id = mujoco.mj_name2id(
-        model, mujoco.mjtObj.mjOBJ_GEOM, "table"
-    )
+    table_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, "table")
     for i in range(data.ncon):
         con = data.contact[i]
         g1, g2 = int(con.geom1), int(con.geom2)
@@ -61,6 +53,24 @@ def print_table_contacts(model, data, stage):
         )
 
 
+def find_main_pad_geom(model, body_name):
+    body_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, body_name)
+    matches = []
+    for gid in range(model.ngeom):
+        if int(model.geom_bodyid[gid]) != body_id:
+            continue
+        if int(model.geom_type[gid]) != int(mujoco.mjtGeom.mjGEOM_BOX):
+            continue
+        if np.allclose(model.geom_size[gid], [0.0085, 0.004, 0.0085], atol=1e-5):
+            if np.allclose(model.geom_pos[gid], [0.0, 0.0055, 0.0445], atol=1e-5):
+                matches.append(gid)
+    if len(matches) != 1:
+        raise RuntimeError(
+            f"Expected one main fingertip pad geom for {body_name}, found {matches}"
+        )
+    return matches[0]
+
+
 def main():
     cfg = Config()
     runtime = Runtime(build_model(cfg.resolve()), cfg.width, cfg.height)
@@ -73,32 +83,24 @@ def main():
         table_id = mujoco.mj_name2id(
             runtime.m, mujoco.mjtObj.mjOBJ_GEOM, "table"
         )
-        table_center = runtime.d.geom_xpos[table_id].copy()
-        table_size = runtime.m.geom_size[table_id].copy()
-        print("Table center:", table_center.round(5).tolist())
-        print("Table half-size:", table_size.round(5).tolist())
+        print("Table center:", runtime.d.geom_xpos[table_id].round(5).tolist())
+        print("Table half-size:", runtime.m.geom_size[table_id].round(5).tolist())
         print_table_contacts(runtime.m, runtime.d, "after HOME")
 
-        print("\n=== Model / actuator inventory ===")
-        for joint_name in [f"joint{i}" for i in range(1, 8)] + [
-            "finger_joint1", "finger_joint2"
-        ]:
-            jid = mujoco.mj_name2id(
-                runtime.m, mujoco.mjtObj.mjOBJ_JOINT, joint_name
-            )
-            adr = runtime.m.jnt_qposadr[jid]
-            print(f"{joint_name}: qpos={runtime.d.qpos[adr]:.5f}")
-        for actuator_name in [f"actuator{i}" for i in range(1, 9)]:
-            aid = mujoco.mj_name2id(
-                runtime.m, mujoco.mjtObj.mjOBJ_ACTUATOR, actuator_name
-            )
-            print(
-                f"{actuator_name}: ctrl={runtime.d.ctrl[aid]:.5f}, "
-                f"ctrlrange={runtime.m.actuator_ctrlrange[aid].tolist()}"
-            )
-
-        if "red_cube" not in belief.objects:
-            raise RuntimeError("Camera did not detect red_cube")
+        print("\n=== TCP geometry audit ===")
+        left_pad = find_main_pad_geom(runtime.m, "left_finger")
+        right_pad = find_main_pad_geom(runtime.m, "right_finger")
+        left_pos = runtime.d.geom_xpos[left_pad].copy()
+        right_pos = runtime.d.geom_xpos[right_pad].copy()
+        pad_midpoint = 0.5 * (left_pos + right_pos)
+        tcp = robot.tcp_pos()
+        print("Hand origin:", robot.hand_pos().round(5).tolist())
+        print("Left main pad center:", left_pos.round(5).tolist())
+        print("Right main pad center:", right_pos.round(5).tolist())
+        print("Pad midpoint:", pad_midpoint.round(5).tolist())
+        print("Computed TCP:", tcp.round(5).tolist())
+        print("TCP / pad-midpoint difference:",
+              f"{np.linalg.norm(tcp - pad_midpoint):.6f} m")
 
         estimated = np.asarray(
             belief.objects["red_cube"]["position"], dtype=float
@@ -110,47 +112,49 @@ def main():
         saved_q = robot.q()
         runtime.d.qpos[robot.qa] = q_solution
         mujoco.mj_forward(runtime.m, runtime.d)
-        fk_at_solution = robot.pos().copy()
-        fk_error = float(np.linalg.norm(fk_at_solution - target))
+        fk_tcp = robot.tcp_pos().copy()
+        fk_error = float(np.linalg.norm(fk_tcp - target))
         runtime.d.qpos[robot.qa] = saved_q
         mujoco.mj_forward(runtime.m, runtime.d)
 
-        print("\n=== IK solution forward-kinematics check ===")
+        print("\n=== TCP IK forward-kinematics check ===")
         print("Estimated red cube:", estimated.round(5).tolist())
-        print("Hand target:", target.round(5).tolist())
-        print("FK at IK solution:", fk_at_solution.round(5).tolist())
-        print("IK FK residual:", f"{fk_error:.5f} m")
+        print("Target TCP:", target.round(5).tolist())
+        print("TCP FK at IK solution:", fk_tcp.round(5).tolist())
+        print("IK TCP residual:", f"{fk_error:.5f} m")
         print("Start joints:", q_before.round(5).tolist())
         print("IK joints:", q_solution.round(5).tolist())
 
-        print("\n=== Execute 3-second joint trajectory ===")
+        print("\n=== Execute 3-second TCP trajectory ===")
         robot.joints(q_solution, dur=3.0)
         q_after = robot.q()
-        ee_after = robot.pos().copy()
+        tcp_after = robot.tcp_pos().copy()
         print("Actual joints:", q_after.round(5).tolist())
         print("Joint tracking error:", (q_after - q_solution).round(5).tolist())
         print("Joint tracking error norm:",
               f"{np.linalg.norm(q_after - q_solution):.5f} rad")
-        print("EE after trajectory:", ee_after.round(5).tolist())
-        print("Cartesian endpoint error:",
-              f"{np.linalg.norm(ee_after - target):.5f} m")
+        print("Hand origin after trajectory:", robot.hand_pos().round(5).tolist())
+        print("TCP after trajectory:", tcp_after.round(5).tolist())
+        print("TCP Cartesian endpoint error:",
+              f"{np.linalg.norm(tcp_after - target):.5f} m")
         print_table_contacts(runtime.m, runtime.d, "after trajectory")
 
         print("\n=== Hold final setpoint for 1.5 seconds ===")
         for _ in range(max(1, int(1.5 / runtime.m.opt.timestep))):
             runtime.step()
         q_hold = robot.q()
-        ee_hold = robot.pos().copy()
+        tcp_hold = robot.tcp_pos().copy()
         print("Actual joints after hold:", q_hold.round(5).tolist())
         print("Joint tracking error after hold:",
               f"{np.linalg.norm(q_hold - q_solution):.5f} rad")
-        print("EE after hold:", ee_hold.round(5).tolist())
-        print("Cartesian endpoint error after hold:",
-              f"{np.linalg.norm(ee_hold - target):.5f} m")
+        print("Hand origin after hold:", robot.hand_pos().round(5).tolist())
+        print("TCP after hold:", tcp_hold.round(5).tolist())
+        print("TCP endpoint error after hold:",
+              f"{np.linalg.norm(tcp_hold - target):.5f} m")
         print_table_contacts(runtime.m, runtime.d, "after hold")
 
-        print("\n=== Finger world positions ===")
-        for body_name in ("hand", "left_finger", "right_finger"):
+        print("\n=== Finger body world positions ===")
+        for body_name in ("left_finger", "right_finger"):
             bid = mujoco.mj_name2id(
                 runtime.m, mujoco.mjtObj.mjOBJ_BODY, body_name
             )

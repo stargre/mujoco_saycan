@@ -5,6 +5,12 @@ JOINTS = [f"joint{i}" for i in range(1, 8)]
 ACT = [f"actuator{i}" for i in range(1, 8)]
 HOME = np.array([0., 0., 0., -1.57079, 0., 1.57079, -0.7853])
 
+# Menagerie Panda MJCF:
+# finger body offset along hand +Z = 0.0584 m
+# main fingertip-pad geom offset inside finger = 0.0445 m
+# The left/right pad Y offsets are mirrored, so their midpoint is on hand Z.
+TCP_OFFSET_LOCAL = np.array([0.0, 0.0, 0.0584 + 0.0445])
+
 
 class Panda:
     def __init__(self, rt):
@@ -33,8 +39,23 @@ class Panda:
     def q(self):
         return self.d.qpos[self.qa].copy()
 
-    def pos(self):
+    def hand_pos(self):
+        """World position of the Menagerie 'hand' body origin."""
         return self.d.xpos[self.ee].copy()
+
+    def tcp_pos(self):
+        """World position of the midpoint of the two main fingertip pads.
+
+        The Menagerie Panda MJCF places each finger body 0.0584 m along the
+        hand-local +Z axis and its main fingertip pad 0.0445 m farther along
+        that axis. The mirrored finger Y offsets cancel at the midpoint.
+        """
+        rotation = self.d.xmat[self.ee].reshape(3, 3)
+        return self.hand_pos() + rotation @ TCP_OFFSET_LOCAL
+
+    def pos(self):
+        """Compatibility alias: controlled end-effector position is the TCP."""
+        return self.tcp_pos()
 
     def joints(self, target, dur=1.3):
         target = np.asarray(target, dtype=float)
@@ -49,11 +70,11 @@ class Panda:
             self.r.step()
         return self.q()
 
-    def ik(self, x, max_iter=300, tol=0.006):
-        """Position-only damped-least-squares IK without changing live state.
+    def ik(self, x, max_iter=300, tol=0.003):
+        """Position-only damped-least-squares IK for the fingertip TCP.
 
-        The solver temporarily changes qpos to evaluate the Jacobian. It always
-        restores the original joint state before returning the solution.
+        IK temporarily changes qpos to evaluate forward kinematics and the
+        Jacobian. It restores the live robot state before returning.
         """
         m = self.r.m
         target = np.asarray(x, dtype=float)
@@ -66,7 +87,8 @@ class Panda:
         try:
             for _ in range(max_iter):
                 mujoco.mj_forward(m, self.d)
-                error = target - self.pos()
+                point = self.tcp_pos()
+                error = target - point
                 last_error = float(np.linalg.norm(error))
                 if last_error < tol:
                     solution = self.q().copy()
@@ -74,7 +96,8 @@ class Panda:
 
                 jacp = np.zeros((3, m.nv))
                 jacr = np.zeros((3, m.nv))
-                mujoco.mj_jacBody(m, self.d, jacp, jacr, self.ee)
+                # Jacobian evaluated at the TCP point, attached to the hand body.
+                mujoco.mj_jac(m, self.d, jacp, jacr, point, self.ee)
                 jac = jacp[:, self.da]
                 damping = 0.04
                 delta = jac.T @ np.linalg.solve(
@@ -93,8 +116,8 @@ class Panda:
 
             if solution is None:
                 raise RuntimeError(
-                    f"IK did not converge for target {target.tolist()}; "
-                    f"last position error={last_error:.4f} m"
+                    f"TCP IK did not converge for target {target.tolist()}; "
+                    f"last TCP error={last_error:.4f} m"
                 )
             return solution
         finally:

@@ -42,36 +42,49 @@ def main():
             + np.array([0.0, 0.0, 0.15])
         )
         q_before = robot.q()
-        ee_before = robot.pos().copy()
+        tcp_before = robot.tcp_pos().copy()
+        hand_before = robot.hand_pos().copy()
         q_solution = robot.ik(target)
         state_delta = float(np.linalg.norm(robot.q() - q_before))
 
-        print("\n=== IK state-preservation audit ===")
-        print("EE before:", ee_before.round(4).tolist())
-        print("Pre-grasp target:", target.round(4).tolist())
+        print("\n=== TCP IK state-preservation audit ===")
+        print("Hand origin before:", hand_before.round(4).tolist())
+        print("TCP before:", tcp_before.round(4).tolist())
+        print("Pre-grasp TCP target:", target.round(4).tolist())
         print("IK solution:", q_solution.round(4).tolist())
         print("Joint-state change caused by IK:", f"{state_delta:.9f} rad")
         if state_delta > 1e-8:
             raise RuntimeError("IK changed the live robot state; it must be a pure calculation")
 
-        robot.move(target, dur=2.0)
-        ee_after = robot.pos().copy()
-        final_error = float(np.linalg.norm(ee_after - target))
+        robot.joints(q_solution, dur=3.0)
+        for _ in range(max(1, int(1.0 / runtime.m.opt.timestep))):
+            runtime.step()
+
+        tcp_after = robot.tcp_pos().copy()
+        hand_after = robot.hand_pos().copy()
+        final_error = float(np.linalg.norm(tcp_after - target))
+        joint_error = float(np.linalg.norm(robot.q() - q_solution))
         joint_delta = float(np.linalg.norm(robot.q() - q_before))
 
-        print("\n=== Physical trajectory audit ===")
-        print("EE after:", ee_after.round(4).tolist())
-        print("Final Cartesian error:", f"{final_error:.4f} m")
+        print("\n=== Physical TCP trajectory audit ===")
+        print("Hand origin after:", hand_after.round(4).tolist())
+        print("TCP after:", tcp_after.round(4).tolist())
+        print("Final TCP Cartesian error:", f"{final_error:.4f} m")
+        print("Joint tracking error:", f"{joint_error:.5f} rad")
         print("Joint displacement:", f"{joint_delta:.4f} rad")
 
         if joint_delta < 0.02:
             raise RuntimeError("No measurable physical joint motion was executed")
-        if final_error > 0.04:
+        if final_error > 0.01:
             raise RuntimeError(
-                f"End effector did not reach the target tolerance: {final_error:.4f} m"
+                f"TCP did not reach the pre-grasp target within 10 mm: {final_error:.4f} m"
+            )
+        if joint_error > 0.02:
+            raise RuntimeError(
+                f"Joint tracking error exceeded 0.02 rad: {joint_error:.5f} rad"
             )
 
-        print("\nIK REACH TEST PASSED")
+        print("\nTCP REACH TEST PASSED")
     finally:
         runtime.close()
 

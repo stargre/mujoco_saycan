@@ -137,11 +137,12 @@ def main():
                 unique_contacts.append(item)
 
         result = {
-            "target_hand_position_world": target.tolist(),
+            "target_tcp_position_world": target.tolist(),
             "ik_joint_target_rad": q_target.tolist(),
             "actual_joint_position_rad": robot.q().tolist(),
-            "actual_hand_position_world": robot.pos().tolist(),
-            "cartesian_endpoint_error_m": float(np.linalg.norm(robot.pos() - target)),
+            "actual_tcp_position_world": robot.tcp_pos().tolist(),
+            "actual_hand_position_world": robot.hand_pos().tolist(),
+            "tcp_cartesian_endpoint_error_m": float(np.linalg.norm(robot.tcp_pos() - target)),
             "robot_table_contact_samples": len(contact_log),
             "robot_table_contacts": unique_contacts,
             "final_robot_table_contacts": final_contacts,

@@ -52,6 +52,35 @@ class Skills:
             for i in range(data.ncon)
         )
 
+    def _robot_table_contacts(self):
+        """Return robot/table contacts, excluding the two movable cubes."""
+        model = self.c.rt.m
+        data = self.c.rt.d
+        table_id = mujoco.mj_name2id(
+            model, mujoco.mjtObj.mjOBJ_GEOM, "table"
+        )
+        if table_id < 0:
+            return []
+        found = []
+        for index in range(data.ncon):
+            contact = data.contact[index]
+            g1, g2 = int(contact.geom1), int(contact.geom2)
+            if table_id not in (g1, g2):
+                continue
+            other = g2 if g1 == table_id else g1
+            body_id = int(model.geom_bodyid[other])
+            body_name = (
+                mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_BODY, body_id) or ""
+            )
+            if body_name in ("red_cube", "blue_cube"):
+                continue
+            found.append({
+                "body": body_name,
+                "distance_m": float(contact.dist),
+                "position_world": np.asarray(contact.pos).round(6).tolist(),
+            })
+        return found
+
     def execute(self, call):
         name = call["name"]
         args = call["args"]
@@ -155,6 +184,13 @@ class Skills:
             ]
             self.c.belief.completed.append("pick")
             self.c.observe()
+            # Empirical TCP-to-cube-center offset from the validated grasp
+            # in this fixed top-down scene. This is a scene calibration, not
+            # a runtime ground-truth object-pose lookup. Recalibrate if the
+            # gripper orientation, cube geometry, or grasp strategy changes.
+            self.c.held_tcp_to_object_offset_world = np.array(
+                [0.00015, -0.00728, 0.01255], dtype=float
+            )
             self._stage("grasp_verified")
             return self._result(
                 name, True, "grasp_and_lift_verified",
@@ -173,74 +209,168 @@ class Skills:
             if target_name not in self.c.belief.objects:
                 return self._result(name, False, "target_not_found", "Placement reference is not visible")
 
+            held_offset = getattr(self.c, "held_tcp_to_object_offset_world", None)
+            if held_offset is None:
+                return self._result(
+                    name, False, "grasp_transform_unavailable",
+                    "No calibrated TCP-to-object transform is available for this grasp",
+                )
+            held_offset = np.asarray(held_offset, dtype=float)
+            if held_offset.shape != (3,) or not np.all(np.isfinite(held_offset)):
+                return self._result(name, False, "invalid_grasp_transform", "Invalid held-object transform")
+
+            model = self.c.rt.m
+            data = self.c.rt.d
+            geom_id = mujoco.mj_name2id(
+                model, mujoco.mjtObj.mjOBJ_GEOM, object_name + "_geom"
+            )
+            table_id = mujoco.mj_name2id(
+                model, mujoco.mjtObj.mjOBJ_GEOM, "table"
+            )
+            if geom_id < 0 or table_id < 0:
+                return self._result(name, False, "missing_scene_geometry", "Object or table geom is missing")
+
             reference = np.asarray(
                 self.c.belief.objects[target_name]["position"], dtype=float
             )
-            release_hand_position = reference + np.array([0.075, 0.0, 0.055])
+            # This scene uses a fixed top-down grasp and world-X placement.
+            # The target position comes from RGB-D belief; only the known table
+            # and cube geometry are used to set a safe release height.
+            table_top = float(model.geom_pos[table_id][2] + model.geom_size[table_id][2])
+            object_half_height = float(model.geom_size[geom_id][2])
+            goal_object = reference.copy()
+            goal_object[0] += 0.075
+            goal_object[2] = table_top + object_half_height + 0.003
+            goal_tcp = goal_object + held_offset
+            preplace_tcp = goal_tcp + np.array([0.0, 0.0, 0.12])
             release_rotation = self.c.robot.rotation()
-            self.c.robot.move(
-                release_hand_position + np.array([0.0, 0.0, 0.13]),
-                dur=1.5, target_rotation=release_rotation,
-            )
-            self.c.robot.move(
-                release_hand_position, dur=1.0, target_rotation=release_rotation,
-            )
-            self.c.robot.grip(True, dur=0.8)
-            self.c.robot.move(
-                release_hand_position + np.array([0.0, 0.0, 0.15]),
-                dur=1.2, target_rotation=release_rotation,
-            )
 
-            for _ in range(max(1, int(0.4 / self.c.rt.m.opt.timestep))):
+            required_fingers = {"left_finger", "right_finger"}
+            initial_fingers, initial_contacts = self._finger_contact(geom_id)
+            if not required_fingers.issubset(initial_fingers):
+                return self._result(
+                    name, False, "grasp_contact_lost_before_place",
+                    "Both fingers must still contact the object before transport",
+                    contacting_fingers=sorted(initial_fingers),
+                    contact_pairs=initial_contacts,
+                )
+
+            self._stage("before_preplace")
+            self.c.robot.move(
+                preplace_tcp, dur=2.0, target_rotation=release_rotation
+            )
+            robot_table_contacts = self._robot_table_contacts()
+            if robot_table_contacts:
+                return self._result(
+                    name, False, "robot_table_collision",
+                    "Robot-table contact detected while moving to pre-place",
+                    contacts=robot_table_contacts,
+                )
+            self._stage("preplace_reached")
+
+            self.c.robot.move(
+                goal_tcp, dur=1.3, target_rotation=release_rotation
+            )
+            robot_table_contacts = self._robot_table_contacts()
+            if robot_table_contacts:
+                return self._result(
+                    name, False, "robot_table_collision",
+                    "Robot-table contact detected during placement approach",
+                    contacts=robot_table_contacts,
+                )
+            self._stage("place_approach_reached")
+
+            approach_fingers, approach_contacts = self._finger_contact(geom_id)
+            if not required_fingers.issubset(approach_fingers):
+                return self._result(
+                    name, False, "grasp_lost_during_transport",
+                    "Bilateral finger contact was lost before release",
+                    contacting_fingers=sorted(approach_fingers),
+                    contact_pairs=approach_contacts,
+                )
+
+            self.c.robot.grip(True, dur=0.8)
+            self._stage("gripper_opened")
+            for _ in range(max(1, int(0.7 / model.opt.timestep))):
+                self.c.rt.step()
+
+            self.c.robot.move(
+                goal_tcp + np.array([0.0, 0.0, 0.15]),
+                dur=1.3, target_rotation=release_rotation,
+            )
+            robot_table_contacts = self._robot_table_contacts()
+            self._stage("retreated")
+
+            for _ in range(max(1, int(0.5 / model.opt.timestep))):
                 self.c.rt.step()
             self.c.observe()
+
+            finger_bodies, contact_pairs = self._finger_contact(geom_id)
+            finger_contact = bool(finger_bodies)
+            table_contact = self._object_table_contact(geom_id)
+            if not finger_contact:
+                self.c.belief.held = None
 
             if object_name not in self.c.belief.objects:
                 return self._result(
                     name, False, "placement_unobserved",
-                    "Released object is not visible after retreat; placement cannot be verified",
+                    "Released object is not visible after retreat",
+                    finger_contact=finger_contact,
+                    table_contact=table_contact,
+                    contact_pairs=contact_pairs,
                 )
 
             placed = np.asarray(
                 self.c.belief.objects[object_name]["position"], dtype=float
             )
-            reference = np.asarray(
+            reference_after = np.asarray(
                 self.c.belief.objects[target_name]["position"], dtype=float
             )
-            distance_xy = float(np.linalg.norm(placed[:2] - reference[:2]))
-            height_difference = float(abs(placed[2] - reference[2]))
-
-            geom_id = mujoco.mj_name2id(
-                self.c.rt.m, mujoco.mjtObj.mjOBJ_GEOM, object_name + "_geom"
-            )
-            finger_bodies, contact_pairs = self._finger_contact(geom_id)
-            finger_contact = bool(finger_bodies)
-            if not finger_contact:
-                self.c.belief.held = None
+            distance_xy = float(np.linalg.norm(placed[:2] - reference_after[:2]))
+            goal_xy_error = float(np.linalg.norm(placed[:2] - goal_object[:2]))
+            height_error = float(abs(placed[2] - goal_object[2]))
 
             verified = (
                 not finger_contact
-                and distance_xy <= 0.15
-                and height_difference <= 0.08
+                and table_contact
+                and goal_xy_error <= 0.045
+                and 0.05 <= distance_xy <= 0.13
+                and height_error <= 0.04
+                and not robot_table_contacts
             )
+            self._stage("placement_checked")
             if not verified:
                 return self._result(
                     name, False, "placement_not_verified",
-                    "Release command ran, but camera-based postcondition failed",
+                    "Release completed, but one or more physical/perceptual postconditions failed",
                     distance_xy=distance_xy,
-                    height_difference=height_difference,
+                    goal_xy_error=goal_xy_error,
+                    height_error=height_error,
+                    finger_contact=finger_contact,
                     contacting_fingers=sorted(finger_bodies),
-                    contact_pairs=contact_pairs,
+                    table_contact=table_contact,
+                    robot_table_contacts=robot_table_contacts,
                     placed_position=placed.tolist(),
-                    reference_position=reference.tolist(),
+                    reference_position=reference_after.tolist(),
+                    goal_object_position=goal_object.tolist(),
+                    contact_pairs=contact_pairs,
                 )
 
-            self.c.belief.completed.append("place")
+            if "place" not in self.c.belief.completed:
+                self.c.belief.completed.append("place")
+            self._stage("placement_verified")
             return self._result(
                 name, True, "placement_verified",
-                "Object is visible near the reference object and no longer finger-held",
+                "Object is on the table, no longer finger-held, and within the target placement tolerance",
                 distance_xy=distance_xy,
-                height_difference=height_difference,
+                goal_xy_error=goal_xy_error,
+                height_error=height_error,
+                finger_contact=finger_contact,
+                table_contact=table_contact,
+                placed_position=placed.tolist(),
+                reference_position=reference_after.tolist(),
+                goal_object_position=goal_object.tolist(),
+                grasp_transform_source="scene_calibrated_tcp_to_object_offset",
             )
 
         if name == "Done":

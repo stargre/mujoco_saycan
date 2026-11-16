@@ -9,6 +9,7 @@ class Context:
         self.robot = Panda(rt)
         self.vision = Vision(rt)
         self.belief = Belief()
+        self.held_tcp_to_object_offset_world = None
         text = task.lower()
         self.task_place = ("place" in text) or ("near" in text)
         self.task_target = (

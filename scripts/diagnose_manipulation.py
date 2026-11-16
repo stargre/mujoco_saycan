@@ -1,9 +1,9 @@
-"""Diagnose Panda IK endpoint tracking, collision contacts and gripper actuation.
+"""Diagnose Panda joint tracking, table contacts, finger geometry and gripper.
 
 Run:
   python scripts/diagnose_manipulation.py
-This is an evaluation/debug utility; simulator ground truth is used only for
-diagnostics, never by the SayCan planner.
+
+Simulator ground truth is used only for debugging, not planner inputs.
 """
 from pathlib import Path
 import sys
@@ -19,24 +19,46 @@ from mujoco_env import build_model, Runtime
 from context import Context
 
 
-def name(model, obj_type, idx):
+def object_name(model, obj_type, idx):
     value = mujoco.mj_id2name(model, obj_type, int(idx))
     return value if value is not None else f"<unnamed:{idx}>"
 
 
-def contact_report(model, data):
+def table_contacts(model, data):
     rows = []
+    table_id = mujoco.mj_name2id(
+        model, mujoco.mjtObj.mjOBJ_GEOM, "table"
+    )
     for i in range(data.ncon):
         con = data.contact[i]
         g1, g2 = int(con.geom1), int(con.geom2)
-        n1 = name(model, mujoco.mjtObj.mjOBJ_GEOM, g1)
-        n2 = name(model, mujoco.mjtObj.mjOBJ_GEOM, g2)
-        b1 = name(model, mujoco.mjtObj.mjOBJ_BODY, model.geom_bodyid[g1])
-        b2 = name(model, mujoco.mjtObj.mjOBJ_BODY, model.geom_bodyid[g2])
-        text = f"{n1} [{b1}] <-> {n2} [{b2}]"
-        if any(k in text.lower() for k in ("finger", "cube", "table", "hand")):
-            rows.append(text)
+        if table_id not in (g1, g2):
+            continue
+        other = g2 if g1 == table_id else g1
+        body_id = int(model.geom_bodyid[other])
+        body = object_name(model, mujoco.mjtObj.mjOBJ_BODY, body_id)
+        geom = object_name(model, mujoco.mjtObj.mjOBJ_GEOM, other)
+        if body in ("red_cube", "blue_cube"):
+            continue
+        rows.append({
+            "body": body,
+            "geom": geom,
+            "contact_xyz": np.asarray(con.pos).round(5).tolist(),
+            "distance_m": float(con.dist),
+        })
     return rows
+
+
+def print_table_contacts(model, data, stage):
+    rows = table_contacts(model, data)
+    print(f"\n=== Robot-table contacts: {stage} ({len(rows)}) ===")
+    if not rows:
+        print("No robot-table contacts detected.")
+    for row in rows:
+        print(
+            f"{row['body']} / {row['geom']}: "
+            f"point={row['contact_xyz']}, dist={row['distance_m']:.6f} m"
+        )
 
 
 def main():
@@ -47,6 +69,15 @@ def main():
         robot = ctx.robot
         robot.home()
         belief = ctx.observe()
+
+        table_id = mujoco.mj_name2id(
+            runtime.m, mujoco.mjtObj.mjOBJ_GEOM, "table"
+        )
+        table_center = runtime.d.geom_xpos[table_id].copy()
+        table_size = runtime.m.geom_size[table_id].copy()
+        print("Table center:", table_center.round(5).tolist())
+        print("Table half-size:", table_size.round(5).tolist())
+        print_table_contacts(runtime.m, runtime.d, "after HOME")
 
         print("\n=== Model / actuator inventory ===")
         for joint_name in [f"joint{i}" for i in range(1, 8)] + [
@@ -76,8 +107,6 @@ def main():
         q_before = robot.q()
         q_solution = robot.ik(target)
 
-        # Independently evaluate the FK of the IK solution without leaving a
-        # changed simulation state behind.
         saved_q = robot.q()
         runtime.d.qpos[robot.qa] = q_solution
         mujoco.mj_forward(runtime.m, runtime.d)
@@ -96,43 +125,29 @@ def main():
 
         print("\n=== Execute 3-second joint trajectory ===")
         robot.joints(q_solution, dur=3.0)
-        q_after_trajectory = robot.q()
-        ee_after_trajectory = robot.pos().copy()
-        print("Actual joints:", q_after_trajectory.round(5).tolist())
-        print("Joint tracking error:", (q_after_trajectory - q_solution).round(5).tolist())
-        print(
-            "Joint tracking error norm:",
-            f"{np.linalg.norm(q_after_trajectory - q_solution):.5f} rad"
-        )
-        print("EE after trajectory:", ee_after_trajectory.round(5).tolist())
-        print(
-            "Cartesian endpoint error:",
-            f"{np.linalg.norm(ee_after_trajectory - target):.5f} m"
-        )
+        q_after = robot.q()
+        ee_after = robot.pos().copy()
+        print("Actual joints:", q_after.round(5).tolist())
+        print("Joint tracking error:", (q_after - q_solution).round(5).tolist())
+        print("Joint tracking error norm:",
+              f"{np.linalg.norm(q_after - q_solution):.5f} rad")
+        print("EE after trajectory:", ee_after.round(5).tolist())
+        print("Cartesian endpoint error:",
+              f"{np.linalg.norm(ee_after - target):.5f} m")
+        print_table_contacts(runtime.m, runtime.d, "after trajectory")
 
         print("\n=== Hold final setpoint for 1.5 seconds ===")
         for _ in range(max(1, int(1.5 / runtime.m.opt.timestep))):
             runtime.step()
-        q_after_hold = robot.q()
-        ee_after_hold = robot.pos().copy()
-        print("Actual joints after hold:", q_after_hold.round(5).tolist())
-        print(
-            "Joint tracking error after hold:",
-            f"{np.linalg.norm(q_after_hold - q_solution):.5f} rad"
-        )
-        print("EE after hold:", ee_after_hold.round(5).tolist())
-        print(
-            "Cartesian endpoint error after hold:",
-            f"{np.linalg.norm(ee_after_hold - target):.5f} m"
-        )
-
-        print("\n=== Robot / table / cube contact pairs ===")
-        rows = contact_report(runtime.m, runtime.d)
-        if rows:
-            for row in rows:
-                print("-", row)
-        else:
-            print("No matching contacts in current contact manifold")
+        q_hold = robot.q()
+        ee_hold = robot.pos().copy()
+        print("Actual joints after hold:", q_hold.round(5).tolist())
+        print("Joint tracking error after hold:",
+              f"{np.linalg.norm(q_hold - q_solution):.5f} rad")
+        print("EE after hold:", ee_hold.round(5).tolist())
+        print("Cartesian endpoint error after hold:",
+              f"{np.linalg.norm(ee_hold - target):.5f} m")
+        print_table_contacts(runtime.m, runtime.d, "after hold")
 
         print("\n=== Finger world positions ===")
         for body_name in ("hand", "left_finger", "right_finger"):
@@ -141,7 +156,7 @@ def main():
             )
             print(f"{body_name}: {runtime.d.xpos[bid].round(5).tolist()}")
 
-        print("\n=== Gripper open/close actuator check (no object grasp) ===")
+        print("\n=== Gripper open/close actuator check ===")
         for opened in (False, True):
             robot.grip(opened, dur=1.0)
             values = []
@@ -155,8 +170,6 @@ def main():
                 f"finger qpos={np.asarray(values).round(5).tolist()}, "
                 f"actuator8 ctrl={runtime.d.ctrl[robot.g]:.3f}"
             )
-
-        print("\nDIAGNOSTIC COMPLETE")
     finally:
         runtime.close()
 

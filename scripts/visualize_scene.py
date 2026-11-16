@@ -1,12 +1,4 @@
-"""Export headless MuJoCo visualization artifacts (PNG + GIF).
-
-Run with MUJOCO_GL=egl on a headless Linux server:
-  python scripts/visualize_scene.py
-
-Outputs are written to outputs/visualization/.
-The motion animation is a real simulated joint-space trajectory from home to
-the camera-estimated pre-grasp waypoint; it is not a teleport animation.
-"""
+"""Export headless MuJoCo PNG/GIF with robot-table collision annotations."""
 from pathlib import Path
 import sys
 import json
@@ -24,11 +16,38 @@ from mujoco_env import build_model, Runtime
 from context import Context
 
 
-def render_frame(runtime, camera, label):
+def robot_table_contacts(model, data):
+    table_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, "table")
+    found = []
+    for i in range(data.ncon):
+        con = data.contact[i]
+        g1, g2 = int(con.geom1), int(con.geom2)
+        if table_id not in (g1, g2):
+            continue
+        other = g2 if g1 == table_id else g1
+        body_id = int(model.geom_bodyid[other])
+        body = mujoco.mj_id2name(
+            model, mujoco.mjtObj.mjOBJ_BODY, body_id
+        ) or f"body_{body_id}"
+        if body in ("red_cube", "blue_cube"):
+            continue
+        found.append({
+            "body": body,
+            "point": np.asarray(con.pos).round(5).tolist(),
+            "dist_m": float(con.dist),
+        })
+    return found
+
+
+def render_frame(runtime, camera, label, contacts=None):
     frame = Image.fromarray(runtime.render(camera=camera))
     draw = ImageDraw.Draw(frame)
     draw.rectangle((0, 0, frame.width, 28), fill=(0, 0, 0))
     draw.text((10, 7), label, fill=(255, 255, 255))
+    if contacts:
+        bodies = ", ".join(sorted({item["body"] for item in contacts}))
+        draw.rectangle((0, 30, frame.width, 55), fill=(150, 0, 0))
+        draw.text((10, 37), f"ROBOT-TABLE CONTACT: {bodies}", fill=(255, 255, 255))
     return frame
 
 
@@ -36,12 +55,8 @@ def save_gif(frames, path, fps):
     if not frames:
         raise RuntimeError(f"No frames generated for {path}")
     frames[0].save(
-        path,
-        save_all=True,
-        append_images=frames[1:],
-        duration=max(20, int(1000 / fps)),
-        loop=0,
-        optimize=True,
+        path, save_all=True, append_images=frames[1:],
+        duration=max(20, int(1000 / fps)), loop=0, optimize=True
     )
 
 
@@ -54,7 +69,6 @@ def main():
 
     out = Path(args.output)
     out.mkdir(parents=True, exist_ok=True)
-
     cfg = Config()
     runtime = Runtime(build_model(cfg.resolve()), cfg.width, cfg.height)
     try:
@@ -63,10 +77,11 @@ def main():
         robot.home()
         belief = context.observe()
 
-        # Save static overview images at the home pose.
         for camera in ("overhead", "side_view"):
-            frame = render_frame(runtime, camera, f"Franka Panda | HOME | {camera}")
-            frame.save(out / f"home_{camera}.png")
+            render_frame(runtime, camera, f"Franka Panda | HOME | {camera}",
+                         robot_table_contacts(runtime.m, runtime.d)).save(
+                out / f"home_{camera}.png"
+            )
 
         if "red_cube" not in belief.objects:
             raise RuntimeError("RGB-D camera did not localize red_cube")
@@ -76,10 +91,8 @@ def main():
         q_start = robot.q()
         q_target = robot.ik(target)
 
-        # Render synchronized overhead and side-view frames while the simulator
-        # follows a quintic joint-space trajectory.
-        overhead_frames = []
-        side_frames = []
+        overhead_frames, side_frames = [], []
+        contact_log = []
         n_steps = max(2, int(args.duration / runtime.m.opt.timestep))
         stride = max(1, n_steps // max(1, args.fps * args.duration))
         for step in range(n_steps):
@@ -87,44 +100,56 @@ def main():
             blend = 10 * tau**3 - 15 * tau**4 + 6 * tau**5
             runtime.d.ctrl[robot.ai] = q_start + blend * (q_target - q_start)
             runtime.step()
+            contacts = robot_table_contacts(runtime.m, runtime.d)
+            if contacts:
+                contact_log.extend(contacts)
             if step % stride == 0 or step == n_steps - 1:
                 label = f"HOME -> PRE-GRASP | t={runtime.d.time:.2f}s"
-                overhead_frames.append(render_frame(runtime, "overhead", label))
-                side_frames.append(render_frame(runtime, "side_view", label))
+                overhead_frames.append(
+                    render_frame(runtime, "overhead", label, contacts)
+                )
+                side_frames.append(
+                    render_frame(runtime, "side_view", label, contacts)
+                )
 
-        # Hold the final command briefly so the GIF shows the achieved endpoint.
         for _ in range(max(1, int(0.5 / runtime.m.opt.timestep))):
             runtime.step()
+        final_contacts = robot_table_contacts(runtime.m, runtime.d)
         for camera, frames in (
-            ("overhead", overhead_frames),
-            ("side_view", side_frames),
+            ("overhead", overhead_frames), ("side_view", side_frames)
         ):
-            frames.append(
-                render_frame(runtime, camera, f"PRE-GRASP HOLD | {camera}")
-            )
+            frames.append(render_frame(
+                runtime, camera, f"PRE-GRASP HOLD | {camera}", final_contacts
+            ))
             save_gif(frames, out / f"reach_{camera}.gif", args.fps)
 
         for camera in ("overhead", "side_view"):
             render_frame(
-                runtime, camera, f"FINAL SIM STATE | {camera}"
+                runtime, camera, f"FINAL SIM STATE | {camera}", final_contacts
             ).save(out / f"final_{camera}.png")
+
+        unique_contacts = []
+        seen = set()
+        for item in contact_log:
+            key = (item["body"], tuple(item["point"]))
+            if key not in seen:
+                seen.add(key)
+                unique_contacts.append(item)
 
         result = {
             "target_hand_position_world": target.tolist(),
             "ik_joint_target_rad": q_target.tolist(),
             "actual_joint_position_rad": robot.q().tolist(),
             "actual_hand_position_world": robot.pos().tolist(),
-            "cartesian_endpoint_error_m": float(
-                np.linalg.norm(robot.pos() - target)
-            ),
+            "cartesian_endpoint_error_m": float(np.linalg.norm(robot.pos() - target)),
+            "robot_table_contact_samples": len(contact_log),
+            "robot_table_contacts": unique_contacts,
+            "final_robot_table_contacts": final_contacts,
             "simulation_time_s": float(runtime.d.time),
             "artifacts": [
-                "home_overhead.png",
-                "home_side_view.png",
-                "reach_overhead.gif",
-                "reach_side_view.gif",
-                "final_overhead.png",
-                "final_side_view.png",
+                "home_overhead.png", "home_side_view.png",
+                "reach_overhead.gif", "reach_side_view.gif",
+                "final_overhead.png", "final_side_view.png",
             ],
         }
         (out / "visualization_report.json").write_text(

@@ -1,6 +1,6 @@
 # MuJoCo SayCan — Franka Panda
 
-An evolving integration of the MiniGrid SayCan architecture in a continuous-space Franka Panda tabletop manipulation scene.
+An evolving integration of MiniGrid SayCan in a continuous-space Franka Panda tabletop scene.
 
 ## Setup
 
@@ -12,55 +12,36 @@ export PANDA_MODEL_DIR=/mnt/data2/zhiyu/embodied-lab/mujoco/05_franka_panda/mujo
 export MUJOCO_GL=egl
 ~~~
 
-## Visualization
-
-Headless server: export PNG snapshots and two camera-view GIFs of the actual simulated home-to-pregrasp joint trajectory:
+## Visualization and collision audit
 
 ~~~bash
 python scripts/visualize_scene.py
-~~~
-
-Files are saved under `outputs/visualization/`:
-- `home_overhead.png`, `home_side_view.png`
-- `reach_overhead.gif`, `reach_side_view.gif`
-- `final_overhead.png`, `final_side_view.png`
-- `visualization_report.json`
-
-You can open the PNG/GIF files directly on the server or copy the directory to your workstation.
-
-Interactive GUI (requires a desktop display or X11 forwarding; not suitable for a headless SSH session without display forwarding):
-
-~~~bash
-python scripts/viewer_gui.py
-~~~
-
-## Tests
-
-Model and RGB-D smoke test:
-
-~~~bash
-python scripts/smoke_test.py
-~~~
-
-Planner state unit tests:
-
-~~~bash
-python -m unittest tests/test_planner_state.py -v
-~~~
-
-Camera localization and physical IK reach test:
-
-~~~bash
-python scripts/test_ik_reach.py
-~~~
-
-Detailed diagnosis of IK joint tracking, robot/table collision contacts, finger geometry and gripper actuator:
-
-~~~bash
 python scripts/diagnose_manipulation.py
 ~~~
 
+The tabletop now defaults to x=[0.34, 0.90] m, retaining both cubes while moving its front edge away from the Panda shoulder region. This is a candidate scene-clearance correction; verify the contact report on the target machine. The table can be tuned without editing code:
+
+~~~bash
+export SAYCAN_TABLE_X_MIN=0.34
+export SAYCAN_TABLE_X_MAX=0.90
+export SAYCAN_TABLE_Y_HALF=0.48
+export SAYCAN_TABLE_TOP=0.36
+export SAYCAN_TABLE_THICKNESS=0.08
+~~~
+
+The visualizer marks robot-table contacts in PNG/GIF frames and reports contact locations in `visualization_report.json`. Cube-table support contacts are excluded from this collision warning.
+
+## Other tests
+
+~~~bash
+python scripts/smoke_test.py
+python -m unittest tests/test_planner_state.py -v
+python scripts/test_ik_reach.py
+~~~
+
 ## SayCan task
+
+Only run the full task after the arm reaches the pre-grasp target without robot-table contacts and the grasp test is validated.
 
 ~~~bash
 python scripts/run_saycan.py --scorer keyword --task "Pick up the red cube and place it near the blue cube"
@@ -76,4 +57,4 @@ python scripts/run_saycan.py --scorer qwen --task "Pick up the red cube and plac
 
 ## Current limitations
 
-This is a limited two-cube tabletop prototype, not a verified full reproduction of Google's real-robot system. IK is position-only and does not perform global collision-aware planning. The fixed camera and hand-frame waypoints need calibration. Grasp friction, contact stability, and placement tolerance must be validated through physical trajectory tests before using success rates as research evidence.
+This is a limited two-cube tabletop prototype, not a verified full reproduction of Google's real-robot system. IK is position-only and not collision-aware. The hand body origin is not the gripper TCP. The table clearance change must be validated on the target model; grasp and placement still require physical contact and postcondition verification.

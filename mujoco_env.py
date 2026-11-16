@@ -1,4 +1,5 @@
 """MuJoCo scene composition and runtime."""
+import os
 import tempfile
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -15,8 +16,32 @@ def build_model(folder):
     if world is None:
         raise RuntimeError(f"No <worldbody> found in {source}")
 
+    # Keep the tabletop under both cubes but move its front edge away from the
+    # Panda shoulder/link2 region. Bounds are configurable for clearance tests.
+    x_min = float(os.getenv("SAYCAN_TABLE_X_MIN", "0.34"))
+    x_max = float(os.getenv("SAYCAN_TABLE_X_MAX", "0.90"))
+    y_half = float(os.getenv("SAYCAN_TABLE_Y_HALF", "0.48"))
+    top = float(os.getenv("SAYCAN_TABLE_TOP", "0.36"))
+    thickness = float(os.getenv("SAYCAN_TABLE_THICKNESS", "0.08"))
+    if not (x_min < 0.405 and x_max > 0.575 and y_half >= 0.20):
+        raise ValueError(
+            "Table bounds must support both cubes: require x_min < 0.405, "
+            "x_max > 0.575 and y_half >= 0.20"
+        )
+    if thickness <= 0 or y_half <= 0:
+        raise ValueError("Table thickness and half-width must be positive")
+
+    table_x = 0.5 * (x_min + x_max)
+    table_half_x = 0.5 * (x_max - x_min)
+    table_z = top - 0.5 * thickness
+    table_half_z = 0.5 * thickness
+
     additions = [
-        '<geom name="table" type="box" pos="0.48 0 0.32" size="0.42 0.48 0.04" rgba="0.55 0.48 0.38 1" friction="1.2 0.02 0.002"/>',
+        (
+            f'<geom name="table" type="box" pos="{table_x} 0 {table_z}" '
+            f'size="{table_half_x} {y_half} {table_half_z}" '
+            'rgba="0.55 0.48 0.38 1" friction="1.2 0.02 0.002"/>'
+        ),
         '<camera name="overhead" pos="0.48 -0.72 1.05" xyaxes="1 0 0 0 0.82 0.57" fovy="55"/>',
         '<camera name="side_view" pos="1.2 -1.2 1.0" xyaxes="0.848 0.530 0 -0.222 0.355 0.914" fovy="50"/>',
         '<body name="red_cube" pos="0.43 -0.16 0.385"><freejoint/><geom name="red_cube_geom" type="box" size="0.025 0.025 0.025" mass="0.08" rgba="0.9 0.08 0.06 1" friction="1.5 0.02 0.002"/></body>',

@@ -5,11 +5,10 @@ JOINTS = [f"joint{i}" for i in range(1, 8)]
 ACT = [f"actuator{i}" for i in range(1, 8)]
 HOME = np.array([0., 0., 0., -1.57079, 0., 1.57079, -0.7853])
 
-# Menagerie Panda MJCF:
-# finger body offset along hand +Z = 0.0584 m
-# main fingertip-pad geom offset inside finger = 0.0445 m
-# The left/right pad Y offsets are mirrored, so their midpoint is on hand Z.
-TCP_OFFSET_LOCAL = np.array([0.0, 0.0, 0.0584 + 0.0445])
+# Menagerie Panda: hand -> finger body (58.4 mm) -> main pad center (44.5 mm).
+# The mirrored finger-local Y offsets cancel when taking the two pad centers'
+# midpoint, leaving this fixed offset in the hand frame.
+TCP_OFFSET_LOCAL = np.array([0.0, 0.0, 0.1029])
 
 
 class Panda:
@@ -40,22 +39,42 @@ class Panda:
         return self.d.qpos[self.qa].copy()
 
     def hand_pos(self):
-        """World position of the Menagerie 'hand' body origin."""
         return self.d.xpos[self.ee].copy()
 
-    def tcp_pos(self):
-        """World position of the midpoint of the two main fingertip pads.
+    def rotation(self):
+        """World-from-hand rotation matrix; TCP axes are aligned with hand."""
+        return self.d.xmat[self.ee].reshape(3, 3).copy()
 
-        The Menagerie Panda MJCF places each finger body 0.0584 m along the
-        hand-local +Z axis and its main fingertip pad 0.0445 m farther along
-        that axis. The mirrored finger Y offsets cancel at the midpoint.
-        """
-        rotation = self.d.xmat[self.ee].reshape(3, 3)
-        return self.hand_pos() + rotation @ TCP_OFFSET_LOCAL
+    def tcp_pos(self):
+        """World position of the midpoint of the two main fingertip pads."""
+        return self.hand_pos() + self.rotation() @ TCP_OFFSET_LOCAL
 
     def pos(self):
         """Compatibility alias: controlled end-effector position is the TCP."""
         return self.tcp_pos()
+
+    @staticmethod
+    def _rotation_error(current, target):
+        """World-frame SO(3) logarithm, expressed as a 3D rotation vector."""
+        relative = target @ current.T
+        cosine = float(np.clip((np.trace(relative) - 1.0) * 0.5, -1.0, 1.0))
+        angle = float(np.arccos(cosine))
+        vee = np.array([
+            relative[2, 1] - relative[1, 2],
+            relative[0, 2] - relative[2, 0],
+            relative[1, 0] - relative[0, 1],
+        ])
+        if angle < 1e-7:
+            return 0.5 * vee
+        if np.pi - angle < 1e-5:
+            # The grasp controller starts near its target orientation. This
+            # branch keeps the log map finite if a caller supplies a near-pi
+            # rotation difference.
+            eigvals, eigvecs = np.linalg.eig(relative)
+            axis = np.real(eigvecs[:, int(np.argmin(np.abs(eigvals - 1.0)))])
+            axis /= max(float(np.linalg.norm(axis)), 1e-12)
+            return angle * axis
+        return (angle / (2.0 * np.sin(angle))) * vee
 
     def joints(self, target, dur=1.3):
         target = np.asarray(target, dtype=float)
@@ -70,38 +89,76 @@ class Panda:
             self.r.step()
         return self.q()
 
-    def ik(self, x, max_iter=300, tol=0.003):
-        """Position-only damped-least-squares IK for the fingertip TCP.
+    def ik(
+        self,
+        x,
+        max_iter=400,
+        tol=0.003,
+        target_rotation=None,
+        orientation_tol=0.015,
+    ):
+        """Damped-least-squares IK for TCP position and optional hand orientation.
 
-        IK temporarily changes qpos to evaluate forward kinematics and the
-        Jacobian. It restores the live robot state before returning.
+        The solver temporarily changes qpos to evaluate forward kinematics and
+        Jacobians. It always restores the live joint state before returning.
+        When target_rotation is supplied, a 6D position/orientation task is
+        solved; otherwise this remains the original position-only 3D IK.
         """
         m = self.r.m
         target = np.asarray(x, dtype=float)
         if target.shape != (3,) or not np.all(np.isfinite(target)):
             raise ValueError(f"Target must be a finite 3D point, got {target}")
 
+        if target_rotation is not None:
+            target_rotation = np.asarray(target_rotation, dtype=float)
+            if target_rotation.shape != (3, 3) or not np.all(np.isfinite(target_rotation)):
+                raise ValueError("target_rotation must be a finite 3x3 matrix")
+            if not np.allclose(target_rotation.T @ target_rotation, np.eye(3), atol=1e-3):
+                raise ValueError("target_rotation must be orthonormal")
+            if np.linalg.det(target_rotation) < 0.999:
+                raise ValueError("target_rotation must be a proper rotation matrix")
+
         q_start = self.q()
         solution = None
-        last_error = float("inf")
+        last_pos_error = float("inf")
+        last_rot_error = float("inf")
         try:
             for _ in range(max_iter):
                 mujoco.mj_forward(m, self.d)
-                point = self.tcp_pos()
-                error = target - point
-                last_error = float(np.linalg.norm(error))
-                if last_error < tol:
-                    solution = self.q().copy()
-                    break
+                pos_error = target - self.tcp_pos()
+                last_pos_error = float(np.linalg.norm(pos_error))
 
                 jacp = np.zeros((3, m.nv))
                 jacr = np.zeros((3, m.nv))
-                # Jacobian evaluated at the TCP point, attached to the hand body.
-                mujoco.mj_jac(m, self.d, jacp, jacr, point, self.ee)
-                jac = jacp[:, self.da]
-                damping = 0.04
+                mujoco.mj_jac(m, self.d, jacp, jacr, self.tcp_pos(), self.ee)
+                jacp = jacp[:, self.da]
+
+                if target_rotation is None:
+                    if last_pos_error < tol:
+                        solution = self.q().copy()
+                        break
+                    jac = jacp
+                    task_error = pos_error
+                else:
+                    rot_error = self._rotation_error(self.rotation(), target_rotation)
+                    last_rot_error = float(np.linalg.norm(rot_error))
+                    if last_pos_error < tol and last_rot_error < orientation_tol:
+                        solution = self.q().copy()
+                        break
+                    orientation_weight = 0.15
+                    jac = np.vstack((
+                        jacp,
+                        orientation_weight * jacr[:, self.da],
+                    ))
+                    task_error = np.concatenate((
+                        pos_error,
+                        orientation_weight * rot_error,
+                    ))
+
+                damping = 0.05
                 delta = jac.T @ np.linalg.solve(
-                    jac @ jac.T + damping**2 * np.eye(3), error
+                    jac @ jac.T + damping**2 * np.eye(jac.shape[0]),
+                    task_error,
                 )
                 q_next = self.q() + np.clip(delta, -0.05, 0.05)
 
@@ -115,17 +172,26 @@ class Panda:
                 self.d.qpos[self.qa] = q_next
 
             if solution is None:
+                detail = f"position error={last_pos_error:.4f} m"
+                if target_rotation is not None:
+                    detail += f", orientation error={last_rot_error:.4f} rad"
                 raise RuntimeError(
-                    f"TCP IK did not converge for target {target.tolist()}; "
-                    f"last TCP error={last_error:.4f} m"
+                    f"TCP IK did not converge for target {target.tolist()}; {detail}"
                 )
             return solution
         finally:
             self.d.qpos[self.qa] = q_start
             mujoco.mj_forward(m, self.d)
 
-    def move(self, x, dur=1.2):
-        q_target = self.ik(x)
+    def ik_pose(self, position, rotation, **kwargs):
+        """Solve a full TCP pose while preserving the requested orientation."""
+        return self.ik(position, target_rotation=rotation, **kwargs)
+
+    def move(self, x, dur=1.2, target_rotation=None):
+        if target_rotation is None:
+            q_target = self.ik(x)
+        else:
+            q_target = self.ik_pose(x, target_rotation)
         return self.joints(q_target, dur)
 
     def grip(self, opened, dur=0.6):

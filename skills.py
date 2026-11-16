@@ -6,12 +6,17 @@ class Skills:
     def __init__(self, ctx):
         self.c = ctx
 
+    def _stage(self, name):
+        callback = getattr(self.c, "on_stage", None)
+        if callback is not None:
+            callback(name)
+
     def _finger_contact(self, target_geom_id):
-        """Return whether target geom is touching a finger geom, not the table."""
+        """Return contacting finger body names and detailed target contact pairs."""
         model = self.c.rt.m
         data = self.c.rt.d
+        finger_bodies = set()
         contacts = []
-        found = False
         for index in range(data.ncon):
             contact = data.contact[index]
             g1, g2 = int(contact.geom1), int(contact.geom2)
@@ -28,10 +33,24 @@ class Skills:
             contacts.append({
                 "other_geom": other_geom_name,
                 "other_body": other_body_name,
+                "distance_m": float(contact.dist),
+                "position_world": np.asarray(contact.pos).round(6).tolist(),
             })
-            if "finger" in other_geom_name.lower() or "finger" in other_body_name.lower():
-                found = True
-        return found, contacts
+            if other_body_name in ("left_finger", "right_finger"):
+                finger_bodies.add(other_body_name)
+        return finger_bodies, contacts
+
+    def _object_table_contact(self, target_geom_id):
+        model = self.c.rt.m
+        data = self.c.rt.d
+        table_id = mujoco.mj_name2id(
+            model, mujoco.mjtObj.mjOBJ_GEOM, "table"
+        )
+        return any(
+            {int(data.contact[i].geom1), int(data.contact[i].geom2)}
+            == {int(table_id), int(target_geom_id)}
+            for i in range(data.ncon)
+        )
 
     def execute(self, call):
         name = call["name"]
@@ -57,28 +76,93 @@ class Skills:
             object_position = np.asarray(
                 self.c.belief.objects[target]["position"], dtype=float
             )
-            # These are hand-frame waypoints; the physical reach test validates IK.
-            self.c.robot.move(object_position + np.array([0.0, 0.0, 0.15]), dur=1.5)
-            self.c.robot.move(object_position + np.array([0.0, 0.0, 0.035]), dur=1.0)
-            self.c.robot.grip(False, dur=0.8)
-            self.c.robot.move(object_position + np.array([0.0, 0.0, 0.17]), dur=1.2)
-
             geom_id = mujoco.mj_name2id(
                 self.c.rt.m, mujoco.mjtObj.mjOBJ_GEOM, target + "_geom"
             )
-            finger_contact, contact_pairs = self._finger_contact(geom_id)
-            if finger_contact:
-                self.c.belief.held = target
+            body_id = mujoco.mj_name2id(
+                self.c.rt.m, mujoco.mjtObj.mjOBJ_BODY, target
+            )
+            if geom_id < 0 or body_id < 0:
+                return self._result(name, False, "invalid_target", f"Missing MuJoCo body/geom for {target}")
+
+            # Lock the current home grasp orientation: the two fingers close
+            # along the world-X direction in this tabletop scene.
+            grasp_rotation = self.c.robot.rotation()
+            pregrasp = object_position + np.array([0.0, 0.0, 0.10])
+            grasp_tcp = object_position.copy()
+            initial_object_z = float(self.c.rt.d.xpos[body_id][2])
+
+            self._stage("before_pregrasp")
+            self.c.robot.move(pregrasp, dur=1.8, target_rotation=grasp_rotation)
+            self._stage("pregrasp_reached")
+
+            # TCP is the midpoint of the main fingertip pads. Placing this
+            # point at the perceived cube center aligns the pads with the
+            # upper side faces; the previous +35 mm offset left them above it.
+            self.c.robot.move(grasp_tcp, dur=1.2, target_rotation=grasp_rotation)
+            self._stage("grasp_approach_reached")
+
+            self.c.robot.grip(False, dur=1.0)
+            for _ in range(max(1, int(0.25 / self.c.rt.m.opt.timestep))):
+                self.c.rt.step()
+            finger_bodies, contact_pairs = self._finger_contact(geom_id)
+            self._stage("gripper_closed")
+
+            required_fingers = {"left_finger", "right_finger"}
+            if not required_fingers.issubset(finger_bodies):
+                self.c.robot.grip(True, dur=0.4)
+                self.c.robot.move(pregrasp, dur=1.0, target_rotation=grasp_rotation)
                 return self._result(
-                    name, True, "grasp_contact_verified",
-                    "Target remains in contact with a finger after the lift",
+                    name, False, "bilateral_grasp_not_verified",
+                    "Both finger bodies must contact the target before lifting",
+                    contacting_fingers=sorted(finger_bodies),
                     contact_pairs=contact_pairs,
                 )
 
+            lift_tcp = grasp_tcp + np.array([0.0, 0.0, 0.12])
+            self.c.robot.move(lift_tcp, dur=1.5, target_rotation=grasp_rotation)
+            for _ in range(max(1, int(0.35 / self.c.rt.m.opt.timestep))):
+                self.c.rt.step()
+
+            lifted_fingers, lift_contacts = self._finger_contact(geom_id)
+            final_object_z = float(self.c.rt.d.xpos[body_id][2])
+            lift_delta = final_object_z - initial_object_z
+            object_on_table = self._object_table_contact(geom_id)
+            self._stage("lift_completed")
+
+            # MuJoCo object pose is used here only as a simulator-side test
+            # oracle. Planner candidates still receive camera belief and
+            # contact-derived held state, not ground-truth object coordinates.
+            lift_verified = (
+                required_fingers.issubset(lifted_fingers)
+                and lift_delta >= 0.06
+                and not object_on_table
+            )
+            if not lift_verified:
+                self.c.belief.held = None
+                return self._result(
+                    name, False, "lift_not_verified",
+                    "The cube did not remain bilaterally grasped and clear the table",
+                    contacting_fingers=sorted(lifted_fingers),
+                    contact_pairs=lift_contacts,
+                    simulator_object_lift_m=lift_delta,
+                    object_still_on_table=object_on_table,
+                )
+
+            self.c.belief.held = target
+            self.c.belief.completed = [
+                item for item in self.c.belief.completed if item != "pick"
+            ]
+            self.c.belief.completed.append("pick")
+            self.c.observe()
+            self._stage("grasp_verified")
             return self._result(
-                name, False, "grasp_not_verified",
-                "No target-to-finger contact after lifting; table contact is not accepted as a grasp",
-                contact_pairs=contact_pairs,
+                name, True, "grasp_and_lift_verified",
+                "Both fingers remain in contact and the cube is lifted clear of the table",
+                contacting_fingers=sorted(lifted_fingers),
+                simulator_object_lift_m=lift_delta,
+                object_still_on_table=object_on_table,
+                contact_pairs=lift_contacts,
             )
 
         if name == "PlaceNear":
@@ -92,18 +176,21 @@ class Skills:
             reference = np.asarray(
                 self.c.belief.objects[target_name]["position"], dtype=float
             )
-            # Place the held cube beside the reference cube, then release and retreat.
             release_hand_position = reference + np.array([0.075, 0.0, 0.055])
+            release_rotation = self.c.robot.rotation()
             self.c.robot.move(
-                release_hand_position + np.array([0.0, 0.0, 0.13]), dur=1.5
+                release_hand_position + np.array([0.0, 0.0, 0.13]),
+                dur=1.5, target_rotation=release_rotation,
             )
-            self.c.robot.move(release_hand_position, dur=1.0)
+            self.c.robot.move(
+                release_hand_position, dur=1.0, target_rotation=release_rotation,
+            )
             self.c.robot.grip(True, dur=0.8)
             self.c.robot.move(
-                release_hand_position + np.array([0.0, 0.0, 0.15]), dur=1.2
+                release_hand_position + np.array([0.0, 0.0, 0.15]),
+                dur=1.2, target_rotation=release_rotation,
             )
 
-            # Let contact dynamics settle before evaluating the released object.
             for _ in range(max(1, int(0.4 / self.c.rt.m.opt.timestep))):
                 self.c.rt.step()
             self.c.observe()
@@ -126,8 +213,8 @@ class Skills:
             geom_id = mujoco.mj_name2id(
                 self.c.rt.m, mujoco.mjtObj.mjOBJ_GEOM, object_name + "_geom"
             )
-            finger_contact, contact_pairs = self._finger_contact(geom_id)
-            # If the object is visible and no longer finger-held, update the belief.
+            finger_bodies, contact_pairs = self._finger_contact(geom_id)
+            finger_contact = bool(finger_bodies)
             if not finger_contact:
                 self.c.belief.held = None
 
@@ -142,7 +229,7 @@ class Skills:
                     "Release command ran, but camera-based postcondition failed",
                     distance_xy=distance_xy,
                     height_difference=height_difference,
-                    finger_contact=finger_contact,
+                    contacting_fingers=sorted(finger_bodies),
                     contact_pairs=contact_pairs,
                     placed_position=placed.tolist(),
                     reference_position=reference.tolist(),

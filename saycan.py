@@ -2,6 +2,7 @@ import copy
 import json
 import math
 import os
+import time
 
 import numpy as np
 
@@ -24,16 +25,20 @@ class Belief:
 def _task_entities(task):
     """Extract the manipulated object and placement reference for this scene."""
     text = task.lower()
-    has_red = "red" in text
-    has_blue = "blue" in text
+    has_red = "red" in text or "红" in text
+    has_blue = "blue" in text or "蓝" in text
+    is_place = any(
+        word in text
+        for word in ("place", "near", "put", "放", "旁边", "附近")
+    )
 
     if has_red and has_blue:
         return "red_cube", "blue_cube"
     if has_red:
-        return "red_cube", "blue_cube" if ("place" in text or "near" in text) else None
+        return "red_cube", "blue_cube" if is_place else None
     if has_blue:
-        return "blue_cube", "red_cube" if ("place" in text or "near" in text) else None
-    if "place" in text or "near" in text:
+        return "blue_cube", "red_cube" if is_place else None
+    if is_place:
         return "red_cube", "blue_cube"
     return None, None
 
@@ -46,7 +51,10 @@ def build_candidates(task, belief):
     candidates using gripper state, observations and IK reachability.
     """
     text = task.lower()
-    is_place_task = ("place" in text) or ("near" in text)
+    is_place_task = any(
+        word in text
+        for word in ("place", "near", "put", "放", "旁边", "附近")
+    )
     source, reference = _task_entities(task)
 
     if source is None:
@@ -121,19 +129,89 @@ def build_candidates(task, belief):
 
 
 class Scorer:
-    def __init__(self, kind="qwen"):
-        self.kind = kind
-        if kind == "qwen":
-            from openai import OpenAI
+    """Semantic relevance scorer used for the Say half of SayCan.
 
-            key = os.getenv("DASHSCOPE_API_KEY")
-            if not key:
-                raise RuntimeError("Set DASHSCOPE_API_KEY")
-            self.client = OpenAI(
-                api_key=key,
-                base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+    ``keyword`` is a deterministic offline baseline. ``qwen`` uses the
+    DashScope OpenAI-compatible endpoint and validates that every candidate is
+    scored exactly once. A client may be injected for tests.
+    """
+
+    def __init__(
+        self,
+        kind="qwen",
+        client=None,
+        api_key=None,
+        model=None,
+        base_url=None,
+    ):
+        self.kind = kind
+        self.request_count = 0
+        self.last_latency_s = 0.0
+        self.model = model or os.getenv("QWEN_MODEL", "qwen-plus")
+        self.base_url = (
+            base_url
+            or os.getenv("QWEN_BASE_URL")
+            or os.getenv("DASHSCOPE_BASE_URL")
+            or "https://dashscope.aliyuncs.com/compatible-mode/v1"
+        )
+        if kind == "qwen":
+            if client is not None:
+                self.client = client
+            else:
+                from openai import OpenAI
+
+                key = (
+                    api_key
+                    or os.getenv("DASHSCOPE_API_KEY")
+                    or os.getenv("QWEN_API_KEY")
+                )
+                if not key:
+                    raise RuntimeError(
+                        "Qwen API key is missing. Set DASHSCOPE_API_KEY "
+                        "(recommended) or QWEN_API_KEY."
+                    )
+                self.client = OpenAI(
+                    api_key=key,
+                    base_url=self.base_url,
+                    timeout=float(os.getenv("QWEN_TIMEOUT_SECONDS", "30")),
+                    max_retries=int(os.getenv("QWEN_MAX_RETRIES", "2")),
+                )
+        elif kind != "keyword":
+            raise ValueError(f"Unknown scorer kind: {kind}")
+
+    @staticmethod
+    def _parse_qwen_response(content, calls):
+        if not isinstance(content, str) or not content.strip():
+            raise ValueError("Qwen returned an empty response")
+        text = content.strip()
+        if text.startswith("```"):
+            lines = text.splitlines()[1:]
+            if lines and lines[-1].strip() == "```":
+                lines.pop()
+            text = "\n".join(lines).strip()
+        data = json.loads(text)
+        expected = {candidate["id"] for candidate in calls}
+        if not isinstance(data, dict) or set(data) != expected:
+            received = sorted(data) if isinstance(data, dict) else type(data).__name__
+            raise ValueError(
+                f"Qwen candidate IDs mismatch: expected={sorted(expected)}, "
+                f"received={received}"
             )
-            self.model = os.getenv("QWEN_MODEL", "qwen-plus")
+
+        parsed = {}
+        for candidate_id, value in data.items():
+            if not isinstance(value, dict) or "relevance" not in value:
+                raise ValueError(f"Invalid Qwen score payload for {candidate_id}")
+            relevance = float(value["relevance"])
+            if not math.isfinite(relevance) or not 0.0 <= relevance <= 1.0:
+                raise ValueError(
+                    f"Qwen relevance for {candidate_id} must be finite and in [0, 1]"
+                )
+            parsed[candidate_id] = {
+                "relevance": relevance,
+                "rationale": str(value.get("rationale", ""))[:300],
+            }
+        return parsed
 
     def score(self, task, calls, belief):
         source, reference = _task_entities(task)
@@ -202,34 +280,34 @@ class Scorer:
                 "does that. Do not omit any candidate."
             ),
         }
-        response = self.client.chat.completions.create(
-            model=self.model,
-            temperature=0,
-            response_format={"type": "json_object"},
-            messages=[{"role": "user", "content": json.dumps(prompt)}],
-        )
-        data = json.loads(response.choices[0].message.content)
-        expected = {candidate["id"] for candidate in calls}
-        if not isinstance(data, dict) or set(data) != expected:
-            raise ValueError(
-                f"Qwen candidate IDs mismatch: expected={sorted(expected)}, "
-                f"received={sorted(data) if isinstance(data, dict) else type(data).__name__}"
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "You are the semantic relevance component of a SayCan "
+                    "planner. Return only valid JSON and score every supplied "
+                    "candidate exactly once. Physical feasibility is handled "
+                    "by another module."
+                ),
+            },
+            {"role": "user", "content": json.dumps(prompt, ensure_ascii=False)},
+        ]
+        started = time.perf_counter()
+        self.request_count += 1
+        try:
+            response = self.client.chat.completions.create(
+                model=self.model,
+                temperature=0,
+                response_format={"type": "json_object"},
+                messages=messages,
             )
-
-        parsed = {}
-        for candidate_id, value in data.items():
-            if not isinstance(value, dict) or "relevance" not in value:
-                raise ValueError(f"Invalid Qwen score payload for {candidate_id}")
-            relevance = float(value["relevance"])
-            if not math.isfinite(relevance) or not 0.0 <= relevance <= 1.0:
-                raise ValueError(
-                    f"Qwen relevance for {candidate_id} must be finite and in [0, 1]"
-                )
-            parsed[candidate_id] = {
-                "relevance": relevance,
-                "rationale": str(value.get("rationale", "")),
-            }
-        return parsed
+        finally:
+            self.last_latency_s = time.perf_counter() - started
+        choices = getattr(response, "choices", None)
+        if not choices:
+            raise ValueError("Qwen returned no choices")
+        content = getattr(getattr(choices[0], "message", None), "content", None)
+        return self._parse_qwen_response(content, calls)
 
 
 class SayCan:
@@ -389,6 +467,16 @@ class SayCan:
                 }
 
             score, say, can, selected, rationale = ranked[0]
+            plan_callback = getattr(self.c, "on_plan", None)
+            if plan_callback is not None:
+                plan_callback({
+                    "round": round_index + 1,
+                    "candidate_scores": copy.deepcopy(candidate_log),
+                    "selected_candidate_id": selected["id"],
+                    "selected_name": selected["name"],
+                    "selected_args": copy.deepcopy(selected["args"]),
+                    "score": score,
+                })
             result = self.c.execute(selected)
             self.history.append({
                 "round": round_index + 1,

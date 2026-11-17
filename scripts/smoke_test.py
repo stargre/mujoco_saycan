@@ -25,7 +25,7 @@ def main():
         assert "blue_cube" in observation.objects, "RGB-D failed to detect blue_cube"
         print("SMOKE TEST PASSED")
     finally:
-        runtime.r.close()
+        runtime.close()
 
 
 if __name__ == "__main__":

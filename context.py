@@ -11,10 +11,13 @@ class Context:
         self.belief = Belief()
         self.held_tcp_to_object_offset_world = None
         text = task.lower()
-        self.task_place = ("place" in text) or ("near" in text)
+        self.task_place = any(
+            word in text
+            for word in ("place", "near", "put", "放", "旁边", "附近")
+        )
         self.task_target = (
-            "red_cube" if "red" in text else
-            "blue_cube" if "blue" in text else None
+            "red_cube" if ("red" in text or "红" in text) else
+            "blue_cube" if ("blue" in text or "蓝" in text) else None
         )
 
     def observe(self):

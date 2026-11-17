@@ -59,6 +59,14 @@ class PlannerStateTests(unittest.TestCase):
             scores["PickUp:1"]["relevance"],
         )
 
+    def test_chinese_place_task_generates_same_grounded_plan(self):
+        candidates = build_candidates(
+            "把红色方块拿起来，放到蓝色方块旁边", self.belief
+        )
+        self.assertEqual(candidates[0], ("PickUp", {"target": "red_cube"}))
+        self.assertIn(("PickUp", {"target": "blue_cube"}), candidates)
+
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -72,24 +72,59 @@ class Runtime:
         self.m = model
         self.d = mujoco.MjData(model)
         self.r = mujoco.Renderer(model, height=h, width=w)
+        self._step_callbacks = []
+        self._viewer = None
+        self._closed = False
         mujoco.mj_resetData(model, self.d)
         mujoco.mj_forward(model, self.d)
 
     def step(self):
         mujoco.mj_step(self.m, self.d)
+        if self._viewer is not None:
+            if self._viewer.is_running():
+                self._viewer.sync()
+            else:
+                self._viewer = None
+        for callback in tuple(self._step_callbacks):
+            callback(self)
+
+    def add_step_callback(self, callback):
+        if callback not in self._step_callbacks:
+            self._step_callbacks.append(callback)
+
+    def remove_step_callback(self, callback):
+        if callback in self._step_callbacks:
+            self._step_callbacks.remove(callback)
+
+    def enable_viewer(self):
+        """Open a passive native viewer and synchronize it during motion."""
+        if self._viewer is None:
+            import mujoco.viewer
+
+            self._viewer = mujoco.viewer.launch_passive(self.m, self.d)
+        return self._viewer
 
     def render(self, mode="rgb", camera="overhead"):
         self.r.update_scene(self.d, camera=camera)
-        if mode == "depth":
-            self.r.enable_depth_rendering()
-        elif mode == "seg":
-            self.r.enable_segmentation_rendering()
-        image = self.r.render().copy()
-        if mode == "depth":
-            self.r.disable_depth_rendering()
-        elif mode == "seg":
-            self.r.disable_segmentation_rendering()
-        return image
+        try:
+            if mode == "depth":
+                self.r.enable_depth_rendering()
+            elif mode == "seg":
+                self.r.enable_segmentation_rendering()
+            elif mode != "rgb":
+                raise ValueError(f"Unknown render mode: {mode}")
+            return self.r.render().copy()
+        finally:
+            if mode == "depth":
+                self.r.disable_depth_rendering()
+            elif mode == "seg":
+                self.r.disable_segmentation_rendering()
 
     def close(self):
+        if self._closed:
+            return
+        self._closed = True
+        if self._viewer is not None:
+            self._viewer.close()
+            self._viewer = None
         self.r.close()

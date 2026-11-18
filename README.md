@@ -26,6 +26,22 @@ Qwen **不控制关节，也不判断碰撞或 IK**；它只给候选技能打�
 
 推荐 Python 3.10–3.12。
 
+Linux 服务器（不要使用 PowerShell 的 `Activate.ps1`）：
+
+```bash
+git clone https://github.com/stargre/mujoco_saycan.git
+cd mujoco_saycan
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+python scripts/setup_assets.py
+python -m unittest discover -s tests -v
+python scripts/smoke_test.py
+```
+
+Windows PowerShell：
+
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
@@ -36,7 +52,13 @@ python -m unittest discover -s tests -v
 python scripts/smoke_test.py
 ```
 
-Linux/macOS 把激活命令换成 `source .venv/bin/activate`。Linux 无显示器运行前通常需要 `export MUJOCO_GL=egl`；Windows 本地图形环境保持默认即可。
+如果服务器已经有 `mujoco_menagerie/franka_emika_panda`，无需下载：
+
+```bash
+export PANDA_MODEL_DIR=/path/to/mujoco_menagerie/franka_emika_panda
+```
+
+Linux 无显示器运行前通常需要 `export MUJOCO_GL=egl`；Windows 本地图形环境保持默认即可。
 
 运行离线关键词基线，并生成 GIF、HTML 和 JSON：
 
@@ -101,6 +123,26 @@ python scripts/run_saycan.py --scorer keyword --visualize record
 
 每一层只在上一层通过后继续。`test_place.py` 会验证：抓取和放置成功、方块接触桌面、手指已释放、机械臂未碰桌、目标位置误差和稳定时间均在阈值内。
 
+## 数据集批量评测
+
+单个红方块任务只是物理 smoke test。仓库同时提供
+`benchmarks/saycan_tabletop_v1.jsonl`：12 个数据集 episode，覆盖 Pick/Place、
+红/蓝源物体、4 种物理布局、中英文和同义改写。
+
+```bash
+python scripts/evaluate_dataset.py --scorer keyword
+```
+
+输出位于 `outputs/benchmark/summary.json`、`results.csv` 以及每个 episode
+的完整规划轨迹。Qwen 会产生 API 调用，建议先跑两个 episode：
+
+```bash
+python scripts/evaluate_dataset.py --scorer qwen --max-episodes 2
+```
+
+这是仓库内的**评测数据集**，不是技能训练数据。当前 Can 使用确定性 IK、接触和
+状态后置条件，没有声称使用原始 SayCan 的学习型 affordance/value-function 数据。
+
 ## 目录
 
 - `mujoco_env.py`：Menagerie 场景组合、运行时、渲染和原生 viewer；
@@ -110,9 +152,11 @@ python scripts/run_saycan.py --scorer keyword --visualize record
 - `saycan.py`：候选生成、Keyword/Qwen 打分、Can 与闭环规划；
 - `visualization.py`：运行过程 GIF、PNG、时间线和 HTML 报告；
 - `scripts/setup_assets.py`：只下载 MuJoCo Menagerie 的 Panda 资产；
+- `benchmarks/`：JSONL 多任务、多布局评测集及数据卡；
+- `scripts/evaluate_dataset.py`：批量运行数据集并生成成功率/CSV/逐例轨迹；
 - `tests/`：规划状态、中文任务与 Qwen JSON 契约测试。
 
 ## 适用边界
 
-这是固定双方块桌面场景的研究复刻，不是 Google 真实机器人系统的完整复制。当前 Can 是接触/状态检查加 IK 可达性，不是全局避障运动规划器；抓取变换针对当前夹爪姿态和 5 cm 方块标定。更换物体尺寸、相机或抓取姿态后需要重新标定并重新跑分层验收。
+这是双方块桌面场景的研究复刻，不是 Google 真实机器人系统的完整复制。当前 Can 是接触/状态检查加 IK 可达性，不是训练出的 value function，也不是全局避障运动规划器；抓取变换针对当前夹爪姿态和 5 cm 方块标定。更换物体尺寸、相机或抓取姿态后需要重新标定并重新跑分层验收。
 

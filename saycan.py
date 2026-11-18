@@ -22,17 +22,26 @@ class Belief:
         })
 
 
-def _task_entities(task):
+def _first_token_position(text, tokens):
+    positions = [text.find(token) for token in tokens if text.find(token) >= 0]
+    return min(positions) if positions else None
+
+
+def task_entities(task):
     """Extract the manipulated object and placement reference for this scene."""
     text = task.lower()
-    has_red = "red" in text or "红" in text
-    has_blue = "blue" in text or "蓝" in text
+    red_position = _first_token_position(text, ("red", "红"))
+    blue_position = _first_token_position(text, ("blue", "蓝"))
+    has_red = red_position is not None
+    has_blue = blue_position is not None
     is_place = any(
         word in text
         for word in ("place", "near", "put", "放", "旁边", "附近")
     )
 
     if has_red and has_blue:
+        if blue_position < red_position:
+            return "blue_cube", "red_cube"
         return "red_cube", "blue_cube"
     if has_red:
         return "red_cube", "blue_cube" if is_place else None
@@ -41,6 +50,10 @@ def _task_entities(task):
     if is_place:
         return "red_cube", "blue_cube"
     return None, None
+
+
+# Backward-compatible private alias used by earlier callers/tests.
+_task_entities = task_entities
 
 
 def build_candidates(task, belief):
@@ -55,7 +68,7 @@ def build_candidates(task, belief):
         word in text
         for word in ("place", "near", "put", "放", "旁边", "附近")
     )
-    source, reference = _task_entities(task)
+    source, reference = task_entities(task)
 
     if source is None:
         return [("Explore", {})]
@@ -214,7 +227,7 @@ class Scorer:
         return parsed
 
     def score(self, task, calls, belief):
-        source, reference = _task_entities(task)
+        source, reference = task_entities(task)
 
         if self.kind == "keyword":
             scores = {}

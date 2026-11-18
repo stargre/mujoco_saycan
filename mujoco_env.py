@@ -1,12 +1,13 @@
 """MuJoCo scene composition and runtime."""
 import os
+import math
 import tempfile
 import xml.etree.ElementTree as ET
 from pathlib import Path
 import mujoco
 
 
-def build_model(folder):
+def build_model(folder, object_positions=None):
     folder = Path(folder).resolve()
     source = folder / "scene.xml"
     if not source.is_file():
@@ -36,6 +37,27 @@ def build_model(folder):
     table_z = top - 0.5 * thickness
     table_half_z = 0.5 * thickness
 
+    layout = object_positions or {
+        "red_cube": [0.43, -0.16],
+        "blue_cube": [0.55, 0.16],
+    }
+    positions = {}
+    for name in ("red_cube", "blue_cube"):
+        value = layout.get(name)
+        if not isinstance(value, (list, tuple)) or len(value) not in (2, 3):
+            raise ValueError(f"Layout must provide a 2D/3D position for {name}")
+        x, y = float(value[0]), float(value[1])
+        z = float(value[2]) if len(value) == 3 else top + 0.025
+        if not (x_min + 0.03 <= x <= x_max - 0.03):
+            raise ValueError(f"{name} x={x} is outside the safe table bounds")
+        if abs(y) > y_half - 0.03:
+            raise ValueError(f"{name} y={y} is outside the safe table bounds")
+        positions[name] = (x, y, z)
+    red = positions["red_cube"]
+    blue = positions["blue_cube"]
+    if math.hypot(red[0] - blue[0], red[1] - blue[1]) < 0.10:
+        raise ValueError("The two cubes must start at least 10 cm apart")
+
     additions = [
         (
             f'<geom name="table" type="box" pos="{table_x} 0 {table_z}" '
@@ -44,9 +66,9 @@ def build_model(folder):
         ),
         '<camera name="overhead" pos="0.48 -0.72 1.05" xyaxes="1 0 0 0 0.82 0.57" fovy="55"/>',
         '<camera name="side_view" pos="1.2 -1.2 1.0" xyaxes="0.848 0.530 0 -0.222 0.355 0.914" fovy="50"/>',
-        '<body name="red_cube" pos="0.43 -0.16 0.385"><freejoint/><geom name="red_cube_geom" type="box" size="0.025 0.025 0.025" mass="0.08" rgba="0.9 0.08 0.06 1" friction="1.5 0.02 0.002"/></body>',
-        '<body name="blue_cube" pos="0.55 0.16 0.385"><freejoint/><geom name="blue_cube_geom" type="box" size="0.025 0.025 0.025" mass="0.08" rgba="0.05 0.2 0.95 1" friction="1.5 0.02 0.002"/></body>',
-        '<geom name="target_marker" type="cylinder" pos="0.55 0.16 0.362" size="0.065 0.002" rgba="0.1 0.85 0.2 0.45" contype="0" conaffinity="0"/>',
+        f'<body name="red_cube" pos="{red[0]} {red[1]} {red[2]}"><freejoint/><geom name="red_cube_geom" type="box" size="0.025 0.025 0.025" mass="0.08" rgba="0.9 0.08 0.06 1" friction="1.5 0.02 0.002"/></body>',
+        f'<body name="blue_cube" pos="{blue[0]} {blue[1]} {blue[2]}"><freejoint/><geom name="blue_cube_geom" type="box" size="0.025 0.025 0.025" mass="0.08" rgba="0.05 0.2 0.95 1" friction="1.5 0.02 0.002"/></body>',
+        f'<geom name="target_marker" type="cylinder" pos="{blue[0]} {blue[1]} {top + 0.002}" size="0.065 0.002" rgba="0.1 0.85 0.2 0.45" contype="0" conaffinity="0"/>',
     ]
     for item in additions:
         world.append(ET.fromstring(item))

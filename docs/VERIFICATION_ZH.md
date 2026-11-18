@@ -51,7 +51,9 @@ python -c "import mujoco,numpy,openai,PIL; print(mujoco.__version__, numpy.__ver
 python scripts/setup_assets.py
 ```
 
-脚本只下载 `google-deepmind/mujoco_menagerie` 的 `franka_emika_panda` 目录，并复制上游许可证。成功后应存在：
+脚本通过 Git sparse checkout 只检出 `google-deepmind/mujoco_menagerie` 的
+`franka_emika_panda` 目录，不使用容易触发匿名限流的 GitHub Contents API，
+并复制上游许可证。成功后应存在：
 
 ```text
 assets/franka_emika_panda/scene.xml
@@ -199,7 +201,32 @@ python scripts/run_saycan.py `
 
 Qwen 模式遇到缺少密钥、HTTP 错误或不完整 JSON 会明确失败，不会静默换成 Keyword。因此元数据能区分真正的 Qwen 实验和离线基线。
 
-## 11. 常见故障
+## 11. 数据集批量评测
+
+单例 PlaceNear 是物理验收，不是数据集结论。完整离线评测运行 12 个 JSONL
+episode，覆盖 Pick/Place、红/蓝两种源物体、4 种布局以及中英文：
+
+```bash
+python scripts/evaluate_dataset.py --scorer keyword
+```
+
+输出：
+
+- `outputs/benchmark/summary.json`：总成功率及按语言、任务类型分组的指标；
+- `outputs/benchmark/results.csv`：逐 episode 结果；
+- `outputs/benchmark/episodes/*.json`：完整候选分数、技能序列和物理结果。
+
+Qwen 批量评测会产生多次付费调用，先验证两个 episode：
+
+```bash
+python scripts/evaluate_dataset.py --scorer qwen --max-episodes 2
+```
+
+该 JSONL 是本仓库的 acceptance benchmark，不是训练数据，也不是 Google
+真实机器人数据。当前实现的 Can 是确定性 IK/接触可行性；若要复刻学习型 Can，
+还需要另行采集技能 rollout 数据、训练 value/affordance 模型并做 held-out 评测。
+
+## 12. 常见故障
 
 ### `Franka Panda MJCF was not found`
 
@@ -229,7 +256,7 @@ Qwen 模式遇到缺少密钥、HTTP 错误或不完整 JSON 会明确失败，�
 
 按第 4–7 节逐层重跑并查看对应 JSON/GIF。不要先调 Qwen：语言分数不会修复相机、IK、双指接触或放置标定问题。
 
-## 12. 最小验收清单
+## 13. 最小验收清单
 
 1. 单元测试 → `OK`；
 2. smoke test → 两个方块均检测到；
@@ -240,4 +267,5 @@ Qwen 模式遇到缺少密钥、HTTP 错误或不完整 JSON 会明确失败，�
 7. Qwen API check → `QWEN API CHECK PASSED`；
 8. Qwen `result.json` → `task_complete` 且请求数大于 0；
 9. 保存 `report.html`、GIF、JSON 和 Python/MuJoCo 版本。
+10. `evaluate_dataset.py --scorer keyword` → 全部 episode 通过。
 

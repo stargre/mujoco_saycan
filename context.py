@@ -1,6 +1,6 @@
 from robot import Panda
 from perception import Vision
-from saycan import Belief
+from saycan import Belief, task_entities
 
 
 class Context:
@@ -15,10 +15,7 @@ class Context:
             word in text
             for word in ("place", "near", "put", "放", "旁边", "附近")
         )
-        self.task_target = (
-            "red_cube" if ("red" in text or "红" in text) else
-            "blue_cube" if ("blue" in text or "蓝" in text) else None
-        )
+        self.task_target, _ = task_entities(task)
 
     def observe(self):
         self.belief.objects.update(self.vision.observe())

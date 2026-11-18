@@ -1,0 +1,13 @@
+{"id":"pick_red_en_a","task":"Pick up the red cube","language":"en","category":"pick","layout":{"red_cube":[0.43,-0.16],"blue_cube":[0.55,0.16]},"expected_skills":["PickUp","Done"]}
+{"id":"pick_red_zh_b","task":"请拿起红色方块","language":"zh","category":"pick","layout":{"red_cube":[0.48,-0.14],"blue_cube":[0.56,0.12]},"expected_skills":["PickUp","Done"]}
+{"id":"pick_blue_en_c","task":"Pick up the blue cube","language":"en","category":"pick","layout":{"red_cube":[0.56,0.14],"blue_cube":[0.42,-0.15]},"expected_skills":["PickUp","Done"]}
+{"id":"pick_blue_zh_d","task":"把蓝色方块拿起来","language":"zh","category":"pick","layout":{"red_cube":[0.40,0.10],"blue_cube":[0.56,-0.12]},"expected_skills":["PickUp","Done"]}
+{"id":"place_red_blue_en_a","task":"Pick up the red cube and place it near the blue cube","language":"en","category":"place_near","layout":{"red_cube":[0.43,-0.16],"blue_cube":[0.55,0.16]},"expected_skills":["PickUp","PlaceNear","Done"]}
+{"id":"place_red_blue_zh_b","task":"把红色方块拿起来，放到蓝色方块旁边","language":"zh","category":"place_near","layout":{"red_cube":[0.48,-0.14],"blue_cube":[0.56,0.12]},"expected_skills":["PickUp","PlaceNear","Done"]}
+{"id":"place_red_blue_en_b","task":"Put the red cube near the blue cube","language":"en","category":"place_near","layout":{"red_cube":[0.48,-0.14],"blue_cube":[0.56,0.12]},"expected_skills":["PickUp","PlaceNear","Done"]}
+{"id":"place_red_blue_zh_a","task":"请将红方块放在蓝方块附近","language":"zh","category":"place_near","layout":{"red_cube":[0.43,-0.16],"blue_cube":[0.55,0.16]},"expected_skills":["PickUp","PlaceNear","Done"]}
+{"id":"place_blue_red_en_c","task":"Pick up the blue cube and place it near the red cube","language":"en","category":"place_near","layout":{"red_cube":[0.56,0.14],"blue_cube":[0.42,-0.15]},"expected_skills":["PickUp","PlaceNear","Done"]}
+{"id":"place_blue_red_zh_d","task":"把蓝色方块拿起来，放到红色方块旁边","language":"zh","category":"place_near","layout":{"red_cube":[0.40,0.10],"blue_cube":[0.56,-0.12]},"expected_skills":["PickUp","PlaceNear","Done"]}
+{"id":"place_blue_red_en_d","task":"Put the blue cube near the red cube","language":"en","category":"place_near","layout":{"red_cube":[0.40,0.10],"blue_cube":[0.56,-0.12]},"expected_skills":["PickUp","PlaceNear","Done"]}
+{"id":"place_blue_red_zh_c","task":"请将蓝方块放在红方块附近","language":"zh","category":"place_near","layout":{"red_cube":[0.56,0.14],"blue_cube":[0.42,-0.15]},"expected_skills":["PickUp","PlaceNear","Done"]}
+

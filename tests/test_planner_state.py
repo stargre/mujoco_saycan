@@ -1,6 +1,6 @@
 import unittest
 
-from saycan import Belief, Scorer, build_candidates
+from saycan import Belief, Scorer, build_candidates, task_entities
 
 
 TASK = "Pick up the red cube and place it near the blue cube"
@@ -65,6 +65,20 @@ class PlannerStateTests(unittest.TestCase):
         )
         self.assertEqual(candidates[0], ("PickUp", {"target": "red_cube"}))
         self.assertIn(("PickUp", {"target": "blue_cube"}), candidates)
+
+    def test_blue_before_red_reverses_source_and_reference(self):
+        self.assertEqual(
+            task_entities("Put the blue cube near the red cube"),
+            ("blue_cube", "red_cube"),
+        )
+        self.assertEqual(
+            task_entities("把蓝色方块放到红色方块旁边"),
+            ("blue_cube", "red_cube"),
+        )
+        candidates = build_candidates(
+            "Put the blue cube near the red cube", self.belief
+        )
+        self.assertEqual(candidates[0], ("PickUp", {"target": "blue_cube"}))
 
 
 
